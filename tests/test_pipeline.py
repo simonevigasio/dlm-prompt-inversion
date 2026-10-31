@@ -93,7 +93,7 @@ class StageIntegrationTests(unittest.TestCase):
     def test_stage_b_skips_restarts_after_reaching_tolerance(self):
         config = dict(k=9, max_iterations=2, restarts=3, seed=7, stopping_loss_tolerance=1e30)
         result = invert_prompt([4], self.adapter, observation_layer=0, solver=SolverConfig(restarts=1),
-                               search=AttackConfig(**config))
+                               search=AttackConfig(**config, stop_restarts_at_tolerance=True))
         self.assertEqual(len(result.stage_b.restarts), 1)
         self.assertEqual(result.stage_b.seeds, (7,))
         self.assertEqual(len(result.evaluation["stage_b_restarts"]), 1)

@@ -3,9 +3,8 @@
 The Stage B counterpart of Stage A's ``recover``: ``AttackConfig.restarts``
 attacks start from random non-special tokens drawn with seeds
 ``config.seed + restart``, and the lowest final loss wins (ties keep the
-earliest restart). With ``config.stop_restarts_at_tolerance`` (the default),
-the first restart whose loss reaches ``config.stopping_loss_tolerance`` ends the
-search. Accepts only the target, the model and the configuration; no ground truth.
+earliest restart). 
+Accepts only the target, the model and the configuration; no ground truth.
 """
 from dataclasses import dataclass
 
