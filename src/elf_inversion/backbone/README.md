@@ -6,20 +6,19 @@ turns into tokens. A small reconstruction residual establishes a matching forwar
 computation, **not unique recovery** of the prompt, contextual encoder states, or
 sampled noise.
 
-Inputs are the hidden state, the frozen model (`elf_inversion.model.adapter.ELFAdapter`) and the
+Inputs are the hidden state, the frozen model (`elf_inversion.models.elf.adapter.ELFAdapter`) and the
 declared `ForwardMetadata`. Nothing about the prompt enters recovery. Generating
 hidden states, running Stage B and scoring results live in `elf_inversion.observation`, `elf_inversion.pipeline` and `elf_inversion.cli`.
 
 ```text
 elf_inversion/backbone/
-  forward.py    ELF forward prefix, code constraints, layer-0 algebraic inverse
   solver.py     model-independent Levenberg-Marquardt with matrix-free CG
   recovery.py   recover(): random restarts, result object, Stage B target
 tests/backbone/ CPU-sized checks on a tiny random native ELF; opt-in checkpoint test
 ```
 
 ```python
-from elf_inversion.backbone.forward import ForwardMetadata
+from elf_inversion.models.elf.forward import ForwardMetadata
 from elf_inversion.backbone.recovery import recover
 from elf_inversion.backbone.solver import SolverConfig
 
@@ -44,7 +43,6 @@ are unsupported and must not be interpreted as this inverse problem.
 
 ## Verified interface
 
-The source of truth is ELF commit `5098bf28b5e9b52c329970a7e4e1cc28251c76e6`,
 loaded and checked by `ELFAdapter`. Relevant upstream locations are
 `src/modules/model.py` (`ELF`, `ELFBlock`), `src/modules/layers.py`
 (`BottleneckTextProj`, attention, RMSNorm, RoPE), `src/utils/sampling_utils.py`

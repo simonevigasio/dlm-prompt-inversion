@@ -18,7 +18,7 @@ import numpy as np
 
 from .backbone.recovery import RecoveryResult, recover
 from .backbone.solver import SolverConfig
-from .backbone.forward import BackboneForward
+from .models.elf.forward import BackboneForward
 from .tokens.attack import AttackConfig
 from .tokens.search import SearchResult, search as search_tokens
 

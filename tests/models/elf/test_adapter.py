@@ -10,7 +10,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from elf_inversion.model.adapter import ELFAdapter, _from_hub, native_modules, read_settings
+from elf_inversion.models.elf.adapter import ELFAdapter, _from_hub, native_modules, read_settings
 
 
 class TinyTokenizer:

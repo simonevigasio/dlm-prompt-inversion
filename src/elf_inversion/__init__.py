@@ -18,10 +18,10 @@ _EXPORTS = {
     "generate": "elf_inversion.observation",
     "load_observation": "elf_inversion.observation",
     "save_observation": "elf_inversion.observation",
-    "ForwardMetadata": "elf_inversion.backbone.forward",
+    "ForwardMetadata": "elf_inversion.models.elf.forward",
     "SolverConfig": "elf_inversion.backbone.solver",
     "AttackConfig": "elf_inversion.tokens.attack",
-    "ELFAdapter": "elf_inversion.model.adapter",
+    "ELFAdapter": "elf_inversion.models.elf.adapter",
 }
 __all__ = sorted(_EXPORTS)
 

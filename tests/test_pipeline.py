@@ -6,10 +6,10 @@ import jax.numpy as jnp
 import numpy as np
 
 from elf_inversion import invert_prompt
-from elf_inversion.backbone.forward import ForwardMetadata
+from elf_inversion.models.elf.forward import ForwardMetadata
 from elf_inversion.backbone.recovery import recover
 from elf_inversion.backbone.solver import SolverConfig
-from elf_inversion.model.testing import tiny_native_adapter
+from elf_inversion.models.elf.testing import tiny_native_adapter
 from elf_inversion.observation import observe
 from elf_inversion.pipeline import run_stages
 from elf_inversion.tokens.attack import AttackConfig, attack

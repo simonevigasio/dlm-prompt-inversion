@@ -22,7 +22,7 @@ import numpy as np
 import yaml
 
 Mode = Literal["encoder", "projected"]
-REPO_ROOT = Path(__file__).resolve().parents[3]
+REPO_ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_SETTINGS = REPO_ROOT / "configs" / "model.yaml"
 
 # Upstream ELF modules used here, by short name; they live under <ELF>/src.

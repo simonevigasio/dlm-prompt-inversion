@@ -12,7 +12,7 @@ from elf_inversion.backbone.recovery import recover
 from elf_inversion.backbone.solver import SolverConfig
 from elf_inversion.cli import (FORWARD_MISMATCH, NOISE_ATTEMPTS, load_config, main, repetition_seeds,
                                retry_noise_seed)
-from elf_inversion.model.testing import tiny_native_adapter
+from elf_inversion.models.elf.testing import tiny_native_adapter
 from elf_inversion.observation import ForwardMismatch
 from elf_inversion.pipeline import invert_prompt
 from elf_inversion.tokens.attack import AttackConfig
@@ -52,7 +52,7 @@ class PipelineCommandTests(unittest.TestCase):
             (root / "stage_b.yaml").write_text(yaml.safe_dump({"mode": "projected", "k": 9, "max_iterations": 2,
                                                                "seed": 3, "restarts": 3}))
             dataset = self.write_dataset(root, {"id": "a", "text": "4"})
-            with patch("elf_inversion.model.adapter.ELFAdapter.from_config", return_value=text_adapter()), \
+            with patch("elf_inversion.models.elf.adapter.ELFAdapter.from_config", return_value=text_adapter()), \
                     patch("elf_inversion.pipeline.recover", wraps=recover) as stage_a:
                 main(["--config", str(config), "--dataset", str(dataset), "--output", str(root / "restarts")])
             self.assertEqual(stage_a.call_count, 1)
@@ -82,7 +82,7 @@ class PipelineCommandTests(unittest.TestCase):
                                          {"id": "special", "text": "1"}, {"id": "long", "text": "4 5 6"})
             output = root / "dataset"
             command = ["--config", str(config), "--dataset", str(dataset), "--output", str(output)]
-            with patch("elf_inversion.model.adapter.ELFAdapter.from_config", return_value=text_adapter()):
+            with patch("elf_inversion.models.elf.adapter.ELFAdapter.from_config", return_value=text_adapter()):
                 main(command)
             rows = {r["example_id"]: r for r in map(json.loads, (output / "results.jsonl").read_text().splitlines())}
             self.assertEqual(list(rows), ["a", "b", "special", "long"])
@@ -100,7 +100,7 @@ class PipelineCommandTests(unittest.TestCase):
 
             original = (output / "results.jsonl").read_bytes()
             with patch("elf_inversion.cli.invert_prompt", side_effect=AssertionError("Completed prompt reran")), \
-                    patch("elf_inversion.model.adapter.ELFAdapter.from_config", side_effect=AssertionError("Model reloaded")):
+                    patch("elf_inversion.models.elf.adapter.ELFAdapter.from_config", side_effect=AssertionError("Model reloaded")):
                 main(command)
             self.assertEqual((output / "results.jsonl").read_bytes(), original)
 
@@ -122,7 +122,7 @@ class PipelineCommandTests(unittest.TestCase):
             dataset = self.write_dataset(root, {"id": "a", "text": "4"}, {"id": "b", "text": "5"})
             output = root / "repeated"
             command = ["--config", str(config), "--dataset", str(dataset), "--output", str(output)]
-            with patch("elf_inversion.model.adapter.ELFAdapter.from_config", return_value=text_adapter()), \
+            with patch("elf_inversion.models.elf.adapter.ELFAdapter.from_config", return_value=text_adapter()), \
                     patch("elf_inversion.cli.invert_prompt", wraps=invert_prompt) as invert:
                 main(command)
             rows = [json.loads(line) for line in (output / "results.jsonl").read_text().splitlines()]
@@ -169,7 +169,7 @@ class PipelineCommandTests(unittest.TestCase):
                     raise ForwardMismatch("mismatch", noise_seed, 0.5)
                 return invert_prompt(*args, noise_seed=noise_seed, **kwargs)
 
-            with patch("elf_inversion.model.adapter.ELFAdapter.from_config", return_value=text_adapter()), \
+            with patch("elf_inversion.models.elf.adapter.ELFAdapter.from_config", return_value=text_adapter()), \
                     patch("elf_inversion.cli.invert_prompt", side_effect=invert):
                 main(["--config", str(config), "--dataset", str(dataset), "--output", str(output)])
             rows = {r["example_id"]: r for r in map(json.loads, (output / "results.jsonl").read_text().splitlines())}

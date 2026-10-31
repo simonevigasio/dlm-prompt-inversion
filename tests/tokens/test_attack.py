@@ -7,7 +7,7 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 import jax.numpy as jnp
 import numpy as np
 
-from elf_inversion.model.testing import TinyModel
+from elf_inversion.models.elf.testing import TinyModel
 from elf_inversion.tokens.attack import (AttackConfig, Replacement, attack, candidate_token_batches,
                             exhaustive_single_token_neighborhood, shortlist_replacements)
 

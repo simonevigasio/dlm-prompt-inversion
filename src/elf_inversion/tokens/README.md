@@ -31,7 +31,7 @@ reaches `stopping_loss_tolerance` ends the search and the remaining restarts are
 skipped; `found.restarts` then holds only the restarts that ran.
 
 The attack receives only the target, the initial tokens and the model
-(`elf_inversion.model.adapter.ELFAdapter`); no ground truth. Search
+(`elf_inversion.models.elf.adapter.ELFAdapter`); no ground truth. Search
 settings: `configs/stage_b/`, which list only values that differ from the
 `AttackConfig` defaults. The full pipeline that uses Stage B is
 `elf_inversion.pipeline`; its command is `elf_inversion.cli`.

@@ -22,7 +22,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from .backbone.forward import BackboneForward, ForwardMetadata
+from .models.elf.forward import BackboneForward, ForwardMetadata
 
 HIDDEN_STATE, METADATA, TRUTH = "hidden_state.npy", "observation.json", "truth.npz"
 # Steps of the uniform schedule a later-pass observation is sampled on (ELF's sampling configs use 64).

@@ -5,10 +5,10 @@ import flax.core
 import jax.numpy as jnp
 import numpy as np
 
-from elf_inversion.backbone.forward import BackboneForward, ForwardMetadata
+from elf_inversion.models.elf.forward import BackboneForward, ForwardMetadata
 from elf_inversion.backbone.recovery import recover
 from elf_inversion.backbone.solver import SolverConfig
-from elf_inversion.model.testing import tiny_native_adapter
+from elf_inversion.models.elf.testing import tiny_native_adapter
 from elf_inversion.observation import observe
 
 

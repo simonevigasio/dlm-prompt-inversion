@@ -22,8 +22,8 @@ cuda = ["jax[cuda12]==0.4.38"]
 test = ["torch==2.3.0", "datasets>=2.19"]
 
 [tool.setuptools]
-packages = ["elf_inversion", "elf_inversion.model", "elf_inversion.backbone", "elf_inversion.tokens",
-            "elf_inversion.datasets"]
+packages = ["elf_inversion", "elf_inversion.models", "elf_inversion.models.elf", "elf_inversion.backbone",
+            "elf_inversion.tokens", "elf_inversion.datasets"]
 
 [tool.setuptools.package-dir]
 elf_inversion = "src/elf_inversion"

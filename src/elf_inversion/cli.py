@@ -56,7 +56,7 @@ import yaml
 import elf_inversion
 
 from .backbone.solver import SolverConfig
-from .model.adapter import ELFAdapter
+from .models.elf.adapter import ELFAdapter
 from .observation import SAMPLING_STEPS, ForwardMismatch, prompt_tokens
 from .pipeline import InversionResult, invert_prompt
 from .progress import ProgressLogger
