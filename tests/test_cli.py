@@ -8,6 +8,7 @@ from unittest.mock import patch
 import numpy as np
 import yaml
 
+from elf_inversion.backbone.knowledge import AttackerKnowledge
 from elf_inversion.backbone.recovery import recover
 from elf_inversion.backbone.solver import SolverConfig
 from elf_inversion.cli import (FORWARD_MISMATCH, NOISE_ATTEMPTS, load_config, main, repetition_seeds,
@@ -93,6 +94,9 @@ class PipelineCommandTests(unittest.TestCase):
             self.assertEqual(rows["b"]["prompt_token_count"], 2)
             self.assertEqual(len(rows["a"]["stage_b_restarts"]), 1)
             self.assertIn("token_accuracy", rows["a"]["stage_b_restarts"][0])
+            # The time is saved for every run; here it is the known first-pass time 0.
+            self.assertEqual((rows["a"]["recovered_time"], rows["a"]["true_time"], rows["a"]["time_error"]),
+                             (0.0, 0.0, 0.0))
             summary = json.loads((output / "summary.json").read_text())
             self.assertEqual((summary["prompts"], summary["completed"], summary["skipped"], summary["pending"]),
                              (4, 2, 2, 0))
@@ -218,6 +222,39 @@ class PipelineCommandTests(unittest.TestCase):
             (root / "stage_b.yaml").write_text(yaml.safe_dump({"mode": "encoder"}))
             with self.assertRaisesRegex(ValueError, "projected"):
                 load_config(config)
+
+    def test_attacker_knowledge_config(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            # No section: the attacker knows everything, as before the feature existed.
+            self.assertEqual(load_config(self.write_config(root)).attacker_knowledge, AttackerKnowledge())
+            section = {"observed_rows": "generated", "knows_noise_scale": False}
+            config = load_config(self.write_config(root, attacker_knowledge=section))
+            self.assertEqual(config.attacker_knowledge, AttackerKnowledge(**section))
+            # The manifest records every flag, defaults included.
+            self.assertEqual(config.resolved["attacker_knowledge"],
+                             {"observed_rows": "generated", "knows_time": True, "knows_noise_scale": False})
+            # Bad values are rejected by AttackerKnowledge; unknown flags by the dataclass itself.
+            for bad in ({"observed_rows": "prompt"}, {"knows_time": "yes"}, {"knows_everything": True}):
+                with self.subTest(attacker_knowledge=bad), self.assertRaises((ValueError, TypeError)):
+                    load_config(self.write_config(root, attacker_knowledge=bad))
+
+    def test_attacker_knowledge_reaches_stage_a(self):
+        # End to end: the config section decides which rows Stage A is given.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = self.write_config(root, attacker_knowledge={"observed_rows": "generated"})
+            dataset = self.write_dataset(root, {"id": "a", "text": "4"})
+            with patch("elf_inversion.models.elf.adapter.ELFAdapter.from_config", return_value=text_adapter()), \
+                    patch("elf_inversion.pipeline.recover", wraps=recover) as stage_a:
+                main(["--config", str(config), "--dataset", str(dataset), "--output", str(root / "run")])
+            observation, forward = stage_a.call_args.args[:2]
+            self.assertEqual(forward.knowledge, AttackerKnowledge(observed_rows="generated"))
+            # One prompt row is hidden: Stage A sees only the generated rows.
+            self.assertEqual(observation.shape, forward.observation_shape)
+            self.assertEqual(observation.shape[1], forward.length - 1)
+            manifest = json.loads((root / "run/manifest.json").read_text())
+            self.assertEqual(manifest["configuration"]["attacker_knowledge"]["observed_rows"], "generated")
 
 if __name__ == "__main__":
     unittest.main()

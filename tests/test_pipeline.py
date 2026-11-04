@@ -6,6 +6,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from elf_inversion import invert_prompt
+from elf_inversion.backbone.knowledge import AttackerKnowledge
 from elf_inversion.models.elf.forward import ForwardMetadata
 from elf_inversion.backbone.recovery import recover
 from elf_inversion.backbone.solver import SolverConfig
@@ -62,6 +63,30 @@ class StageIntegrationTests(unittest.TestCase):
         np.testing.assert_array_equal(spy.call_args.args[0], result.stage_b_target)
         self.assertFalse(np.allclose(result.stage_b_target, truth.prompt_code))
         self.assertIsNotNone(discrete)
+
+    def test_unknown_time_is_recovered_by_stage_a(self):
+        # time=0.5 is step 32 of the 64-step schedule, a later sampler call.
+        def run(layer, knows_time):
+            return invert_prompt([4], self.adapter, observation_layer=layer, time=0.5,
+                solver=SolverConfig(restarts=3, max_iterations=100, residual_atol=1e-4, residual_rtol=1e-5),
+                search=AttackConfig(mode="projected", k=9, max_iterations=3), start_tokens=[5],
+                knowledge=AttackerKnowledge(knows_time=knows_time))
+        for layer in (1, 2):
+            with self.subTest(layer=layer):
+                result = run(layer, knows_time=False)
+                e = result.evaluation
+                self.assertTrue(result.stage_a.converged, (result.stage_a.stop_reason, result.stage_a.relative_residual))
+                self.assertEqual(e["true_time"], 0.5)
+                self.assertLess(e["time_error"], 1e-2)
+                self.assertTrue(e["stage_b_exact_tokens"])
+        # Known time: Stage A reports the declared time unchanged.
+        self.assertEqual(run(1, knows_time=True).evaluation["time_error"], 0.0)
+        # Layer 0: the least-squares shortcut has no time coordinate, so Levenberg-Marquardt
+        # runs instead. The prompt is still recovered, but the time does not reach the text
+        # rows there, so its value is not checked.
+        result = run(0, knows_time=False)
+        self.assertEqual(result.stage_a.method, "levenberg_marquardt")
+        self.assertTrue(result.evaluation["stage_b_exact_tokens"])
 
     def test_invert_prompt_library_call(self):
         result = invert_prompt([4], self.adapter, observation_layer=0, solver=SolverConfig(restarts=1),

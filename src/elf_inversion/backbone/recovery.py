@@ -30,6 +30,7 @@ class RecoveryResult:
     selected_restart: int
     method: str
     diagnostics: dict
+    recovered_time: float
 
 
 def _algebraic_result(forward, y, coordinates, config, start):
@@ -53,7 +54,7 @@ def _numerical_restarts(forward, y, config, progress):
         seed = config.seed + restart
         report("restart_start", f"Stage A restart {restart + 1}/{config.restarts} (seed {seed}); "
                "the first iteration includes JIT compilation", restart=restart, seed=seed)
-        initial = forward.initialize(seed, config.prompt_init_std)
+        initial = forward.initialize(seed, config.prompt_init_std, config.noise_init_std)
         result = levenberg_marquardt(forward, y, initial, config, progress=progress)
         results.append(result)
         report("restart_done", f"Stage A restart {restart + 1}/{config.restarts}: "
@@ -92,6 +93,7 @@ def recover(observation, forward: ForwardMap, config=SolverConfig(), *, progress
                if np.isfinite(candidates[i].absolute_residual) else float("inf"))
     result = candidates[best]
     p, g = forward.codes(result.coordinates)
+    time = float(forward.time(result.coordinates))
     # Stage B's projected target includes the affine self-conditioning bias.
     target = jax.lax.stop_gradient(p)
     jax.block_until_ready((p, g, target))
@@ -99,4 +101,4 @@ def recover(observation, forward: ForwardMap, config=SolverConfig(), *, progress
         result.relative_residual, result.converged, result.stop_reason, result.iterations,
         sum(r.iterations for r in candidates), perf_counter() - start,
         summaries[best]["seed"], best, method,
-        {**forward.rank_diagnostics, "restarts": summaries, "regularization": "none"})
+        {**forward.rank_diagnostics, "restarts": summaries, "regularization": "none"}, time)

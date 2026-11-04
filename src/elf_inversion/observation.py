@@ -6,7 +6,8 @@ are only used afterwards to score a recovery.
 
 An observation directory contains:
 
-    hidden_state.npy   full hidden state, [1, prefix + max_length, hidden_size]
+    hidden_state.npy   text rows (prompt + generated) of the hidden state, without the
+                       time/scale/mode prefix rows: [1, max_length, hidden_size]
     observation.json   metadata declared to Stage A, plus how it was generated
     truth.npz          prompt tokens and bottleneck codes, for evaluation only
 
@@ -139,6 +140,7 @@ def observe(adapter, tokens, metadata: ForwardMetadata, *, noise_seed=100, sampl
     layer = metadata.observation_layer
     h = captured["initial"] if layer == 0 else state[f"blocks_{layer - 1}"]["__call__"][0]
     codes = state["text_proj"]["proj1"]["__call__"][0]
+    h = h[:, forward.prefix_length:]  # the prefix rows are not part of the observation
     assert h.shape == forward.observation_shape
     return SyntheticExample(h, codes[:, :metadata.prompt_length], codes[:, metadata.prompt_length:],
                             np.asarray(tokens).reshape(-1))

@@ -6,6 +6,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from ...backbone.knowledge import AttackerKnowledge
+
 
 @dataclass(frozen=True)
 class ForwardMetadata:
@@ -76,7 +78,9 @@ class BackboneForward:
     encoder-to-bottleneck compression. Only one example per inversion is supported.
     """
 
-    def __init__(self, adapter, metadata: ForwardMetadata):
+    def __init__(self, adapter, metadata: ForwardMetadata, knowledge: AttackerKnowledge = AttackerKnowledge()):
+        self.knowledge = knowledge
+        
         validate_metadata(adapter, metadata)
         self.adapter, self.metadata = adapter, metadata
         model = adapter.model
@@ -88,13 +92,16 @@ class BackboneForward:
         # Generation rows: first pass [g, 0] reaches g Wz W1; a later pass [z_t, x_pred_prev]
         # reaches the row space of the whole self-conditioning kernel, [Wz; Ws] W1.
         first_pass = metadata.forward_mode == "first_sampling_pass"
+        if first_pass and not knowledge.knows_time: 
+            raise ValueError("knows_time=False requires forward_mode='sampling_pass': the first pass is always at time 0")
         self.noise_map = (sc["kernel"][:model.text_encoder_dim] if first_pass else sc["kernel"]) @ wb
         self.bias = adapter.projection_bias
         self.prompt_basis, ps, pc = row_basis(self.prompt_map)
         self.noise_basis, gs, gc = row_basis(self.noise_map)
         self.prompt_rank, self.noise_rank = len(self.prompt_basis), len(self.noise_basis)
         self.split = self.n * self.prompt_rank
-        self.size = self.split + (self.length - self.n) * self.noise_rank
+        self.noise_end = self.split + (self.length - self.n) * self.noise_rank
+        self.size = self.noise_end + (0 if knowledge.knows_time else 1)
         self.rank_diagnostics = {
             "prompt_rank": self.prompt_rank, "noise_rank": self.noise_rank,
             "prompt_singular_values": ps.tolist(), "noise_singular_values": gs.tolist(),
@@ -103,6 +110,7 @@ class BackboneForward:
         }
         self.proj2 = adapter.model_params["text_proj"]["proj2"]
         self._prefix = self._make_prefix()
+        self.first_idx_observed_row = 0 if knowledge.observed_rows == "all" else self.n
 
     def _make_prefix(self):
         native = self.adapter.native["model"]
@@ -116,10 +124,13 @@ class BackboneForward:
             batch = x.shape[0]
             if model.num_model_mode_tokens:
                 mode = model.get_variable("params", "mode_tokens")
+                # Decoder/denoiser switch rows. Native ELF gates them to zero on
+                # denoiser calls, which is what is observed; they still shift the
+                # rope positions and enter attention, so they cannot be dropped.
                 x = jnp.concatenate([jnp.tile(mode, (batch, 1, 1)) * 0, x], axis=1)
                 if mask is not None:
                     mask = jnp.concatenate([jnp.ones((batch, model.num_model_mode_tokens), mask.dtype), mask], axis=1)
-            context = jnp.concatenate(model.build_context(t, scale), axis=1)
+            context = jnp.concatenate(model.build_context(t, scale), axis=1)  # time + scale tokens
             x = jnp.concatenate([context, x], axis=1)
             if mask is not None:
                 mask = jnp.concatenate([jnp.ones(context.shape[:2], mask.dtype), mask], axis=1)
@@ -145,15 +156,34 @@ class BackboneForward:
         prefix_type = type("ELFPrefix", (native.ELF,), {"__call__": prefix})
         return prefix_type(**{f.name: getattr(self.adapter.model, f.name)
                               for f in fields(native.ELF) if f.name not in ("parent", "name")})
-
+    
+    def select_rows(self, hidden_state):
+        """
+        hidden_state contains all the lang rows and the result 
+        is compatible with the observation_shape
+        """
+        return hidden_state[:, self.first_idx_observed_row:]
+ 
     @property
     def observation_shape(self):
-        return (1, self.prefix_length + self.length, self.adapter.model.hidden_size)
+        return (1, self.length - self.first_idx_observed_row, self.adapter.model.hidden_size)
 
     def codes(self, coordinates):
         p = coordinates[:self.split].reshape(1, self.n, self.prompt_rank) @ self.prompt_basis + self.bias
-        g = coordinates[self.split:].reshape(1, self.length - self.n, self.noise_rank) @ self.noise_basis + self.bias
+        g = coordinates[self.split:self.noise_end].reshape(1, self.length - self.n, self.noise_rank) @ self.noise_basis + self.bias
         return p, g
+
+    def time(self, coordinates):
+        """Sampler time the coordinates assume.
+
+        If the time is known, it is the declared time stored in the metadata.
+        If it is not known, the last coordinate is the time logit s, and the
+        time is sigmoid(s), which always lies in (0, 1).
+        """
+        if self.knowledge.knows_time: 
+            return self.metadata.time
+        else: 
+            return jax.nn.sigmoid(coordinates[-1])
 
     def coordinates(self, prompt_code, noise_code):
         p = (prompt_code - self.bias) @ self.prompt_basis.T
@@ -167,36 +197,55 @@ class BackboneForward:
         x = nn.Dense(model.hidden_size, use_bias=True).apply({"params": self.proj2}, codes)
         m = self.metadata
         mask = None if m.attention_mask is None else jnp.asarray(m.attention_mask)[None, :]
-        return self._prefix.apply({"params": self.adapter.model_params}, x,
-                                  jnp.asarray([m.time]), jnp.asarray([m.self_cond_cfg_scale]), mask)
+        x = self._prefix.apply({"params": self.adapter.model_params}, x,
+                                  jnp.asarray([self.time(coordinates)]), jnp.asarray([m.self_cond_cfg_scale]), mask)
+        # The prefix rows take part in every block but are not observed.
+        x = x[:, self.prefix_length:]
+        return x[:, self.first_idx_observed_row:]
 
-    def initialize(self, seed, prompt_std=1.0):
+    def initialize(self, seed, prompt_std=1.0, noise_std=1.0):
         """Push forward independent raw draws; projected noise is NOT N(0,I).
 
         N(0,prompt_std² I) in normalized encoder space is an explicit heuristic
         for C, not a learned/empirical encoder prior. Noise follows ELF's actual
-        first-pass law N(0, denoiser_noise_scale² I) before projection. A later
-        pass starts from the noise share of z_t, (1 - t) times that draw, with a
-        zero previous prediction: a heuristic, since z_t and x_pred_prev are unknown.
+        first-pass law N(0, denoiser_noise_scale² I) before projection if the noise
+        scale is known. A later pass starts from the noise share of z_t, (1 - t) 
+        times that draw, with a zero previous prediction: a heuristic, since z_t 
+        and x_pred_prev are unknown.
         """
         if not np.isfinite(prompt_std) or prompt_std < 0:
             raise ValueError("prompt_std must be finite and nonnegative")
+        noise_std = self.adapter.config.denoiser_noise_scale if self.knowledge.knows_noise_scale else noise_std
+        if not np.isfinite(noise_std) or noise_std < 0: 
+            raise ValueError("noise_std must be finite and nonnegative")
         pk, gk = jax.random.split(jax.random.PRNGKey(seed))
+        tk = jax.random.fold_in(jax.random.PRNGKey(seed), 1)
+        t0 = jax.random.uniform(tk, minval=0.01, maxval=0.99) if not self.knowledge.knows_time else self.metadata.time
         d = self.adapter.model.text_encoder_dim
         c = jax.random.normal(pk, (1, self.n, d)) * prompt_std
-        z = jax.random.normal(gk, (1, self.length - self.n, d)) * self.adapter.config.denoiser_noise_scale
+        z = jax.random.normal(gk, (1, self.length - self.n, d)) * noise_std
         if self.metadata.forward_mode == "sampling_pass":
-            z = jnp.concatenate([(1.0 - self.metadata.time) * z, jnp.zeros_like(z)], axis=-1)
-        return self.coordinates(c @ self.prompt_map + self.bias, z @ self.noise_map + self.bias)
+            z = jnp.concatenate([(1.0 - t0) * z, jnp.zeros_like(z)], axis=-1)
+        x = self.coordinates(c @ self.prompt_map + self.bias, z @ self.noise_map + self.bias)
+        if not self.knowledge.knows_time: 
+            x = jnp.append(x, jax.scipy.special.logit(t0))
+        return x
+        
 
     def algebraic(self, observation):
         """Unique code coordinates only if each restricted proj2 map is injective.
 
         Returns None for deeper layers or deficient rank; never claims to recover
-        unique C or raw Gaussian noise. Inconsistent observations still have a
-        residual, including the known prefix rows.
+        unique C or raw Gaussian noise. It returns still None when the rows are not 
+        fully observable.
         """
         if self.metadata.observation_layer != 0:
+            return None
+        if self.knowledge.observed_rows != "all":
+            return None
+        # The least-squares solution has no time coordinate. At layer 0 the time does not
+        # reach the text rows anyway, so it cannot be recovered: leave it to Levenberg-Marquardt.
+        if not self.knowledge.knows_time:
             return None
         kernel, bias = self.proj2["kernel"], self.proj2["bias"]
         matrices = [self.prompt_basis @ kernel, self.noise_basis @ kernel]
@@ -209,7 +258,7 @@ class BackboneForward:
             self.rank_diagnostics[f"{name}_proj2_rank_cutoff"] = float(cutoff)
         if any(rank != a.shape[0] for rank, a in zip(ranks, matrices)):
             return None
-        y = np.asarray(observation)[0, self.prefix_length:] - np.asarray(self.bias @ kernel + bias)
+        y = np.asarray(observation)[0, :] - np.asarray(self.bias @ kernel + bias)
         parts = [np.linalg.lstsq(np.asarray(a).T, b.T, rcond=None)[0].T.reshape(-1)
                  for a, b in zip(matrices, (y[:self.n], y[self.n:]))]
         return jnp.asarray(np.concatenate(parts), dtype=jnp.float32)

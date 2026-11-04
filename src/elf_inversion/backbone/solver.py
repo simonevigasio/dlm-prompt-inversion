@@ -28,6 +28,7 @@ class SolverConfig:
     seed: int = 42
     prompt_init_std: float = 1.0
     algebraic_layer_zero: bool = True
+    noise_init_std: float = 1.0 # the guess used when the scale is unknown
 
     def __post_init__(self):
         for name in ("max_iterations", "cg_max_iterations", "stagnation_iterations", "restarts", "seed"):
@@ -38,7 +39,7 @@ class SolverConfig:
         if self.seed + self.restarts > 2**32:
             raise ValueError("Restart seeds must fit uint32")
         for name in ("cg_rtol", "cg_atol", "residual_atol", "residual_rtol", "step_atol",
-                     "step_rtol", "stagnation_rtol", "prompt_init_std"):
+                     "step_rtol", "stagnation_rtol", "prompt_init_std", "noise_init_std"):
             if not np.isfinite(getattr(self, name)) or getattr(self, name) < 0:
                 raise ValueError(f"{name} must be finite and nonnegative")
         if not all(np.isfinite(v) for v in (self.min_damping, self.initial_damping, self.max_damping)):

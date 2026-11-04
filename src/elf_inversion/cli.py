@@ -63,6 +63,7 @@ from .progress import ProgressLogger
 from .runs import (append_result, canonical, digest, file_sha256, json_safe, locked_directory,
                    read_results, write_manifest)
 from .tokens.attack import AttackConfig
+from .backbone.knowledge import AttackerKnowledge
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SYNTHETIC_KEYS = {"observation_layer", "noise_seed", "self_cond_cfg_scale", "attention_mask", "time",
@@ -81,19 +82,21 @@ class PipelineConfig:
     search: AttackConfig  # includes Stage B's restarts and start seed
     synthetic_observation: dict  # how each dataset prompt's hidden state is generated
     repetitions: int  # runs per prompt, each with seeds derived from (prompt id, repetition)
+    attacker_knowledge: AttackerKnowledge
     resolved: dict  # every setting, with the stage files inlined, for the manifest
-
+    
 
 def load_config(path):
     """Read a pipeline config; stage and model paths are relative to it."""
     path = Path(path).resolve()
     raw = yaml.safe_load(path.read_text())
     required = {"model", "stage_a", "stage_b", "synthetic_observation"}
-    if not required <= raw.keys() <= required | {"repetitions"}:
-        raise ValueError(f"{path}: needs exactly {sorted(required)}, optionally repetitions")
+    if not required <= raw.keys() <= required | {"repetitions", "attacker_knowledge"}:
+        raise ValueError(f"{path}: needs exactly {sorted(required)}, optionally repetitions and attacker_knowledge")
     repetitions = raw.get("repetitions", 1)
     if type(repetitions) is not int or repetitions < 1:
         raise ValueError(f"{path}: repetitions must be an integer >= 1")
+    knowledge = AttackerKnowledge(**(raw.get("attacker_knowledge") or {}))
     # Stage files list only what differs from the SolverConfig/AttackConfig defaults.
     stage_a = yaml.safe_load((path.parent / raw["stage_a"]).read_text()) or {}
     stage_b = yaml.safe_load((path.parent / raw["stage_b"]).read_text()) or {}
@@ -107,9 +110,9 @@ def load_config(path):
         raise ValueError(f"synthetic_observation needs observation_layer; allowed keys: {sorted(SYNTHETIC_KEYS)} "
                          "(prompts come from the --dataset file)")
     # The manifest records every effective value, defaults included, not just the file contents.
-    return PipelineConfig(path, (path.parent / raw["model"]).resolve(), solver, search, synthetic, repetitions,
+    return PipelineConfig(path, (path.parent / raw["model"]).resolve(), solver, search, synthetic, repetitions, knowledge,
                           {**raw, "repetitions": repetitions, "stage_a": asdict(solver), "stage_b": asdict(search),
-                           "stage_a_file": raw["stage_a"], "stage_b_file": raw["stage_b"]})
+                           "stage_a_file": raw["stage_a"], "stage_b_file": raw["stage_b"], "attacker_knowledge": asdict(knowledge)})
 
 
 def generation_options(synthetic):
@@ -124,7 +127,7 @@ def generation_options(synthetic):
 
 def inversion_options(config, progress_interval):
     """Keyword arguments of invert_prompt() from a pipeline config."""
-    return {"solver": config.solver, "search": replace(config.search, progress_interval_seconds=progress_interval)}
+    return {"solver": config.solver, "search": replace(config.search, progress_interval_seconds=progress_interval), "knowledge": config.attacker_knowledge}
 
 
 def derived_seed(*parts):
@@ -250,6 +253,8 @@ def dataset_row(example, repetition, seeds, result: InversionResult, seconds):
             "final_loss": None if best is None else best.final_loss,
             "stage_b_stop_reason": None if best is None else best.stop_reason,
             "prompt_code_error": evaluation["prompt_code_error"], "noise_code_error": evaluation["noise_code_error"],
+            "recovered_time": evaluation["recovered_time"], "true_time": evaluation["true_time"],
+            "time_error": evaluation["time_error"],
             "stage_a": {key: getattr(recovered, key) for key in (
                 "method", "converged", "stop_reason", "absolute_residual", "relative_residual",
                 "iterations", "runtime_seconds")},

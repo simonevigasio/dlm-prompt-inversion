@@ -16,6 +16,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from .backbone.knowledge import AttackerKnowledge
 from .backbone.recovery import RecoveryResult, recover
 from .backbone.solver import SolverConfig
 from .models.elf.forward import BackboneForward
@@ -43,7 +44,7 @@ class InversionResult:
 
 
 def run_stages(observation, adapter, metadata, solver_config=SolverConfig(), attack_config=None,
-               *, start_tokens=None, progress=None):
+               *, start_tokens=None, progress=None, knowledge=AttackerKnowledge()):
     """Stage A, then Stage B on its target; returns (RecoveryResult, SearchResult or None).
 
     Stage B always receives Stage A's estimate, even when Stage A did not
@@ -56,7 +57,8 @@ def run_stages(observation, adapter, metadata, solver_config=SolverConfig(), att
         raise ValueError("Stage A supplies projected targets only; encoder inversion is nonunique")
     report = progress or (lambda *args, **kwargs: None)
     report("stage_a_start", f"Stage A: inverting the hidden state after {metadata.observation_layer} block(s)")
-    recovered = recover(observation, BackboneForward(adapter, metadata), solver_config, progress=progress)
+    forward = BackboneForward(adapter, metadata, knowledge)
+    recovered = recover(forward.select_rows(observation), forward, solver_config, progress=progress)
     report("stage_a_done", f"Stage A finished: {recovered.method}, converged={recovered.converged} "
            f"({recovered.stop_reason}), residual {recovered.absolute_residual:.6g}, "
            f"{recovered.runtime_seconds:.0f}s", converged=recovered.converged,
@@ -72,10 +74,11 @@ def run_stages(observation, adapter, metadata, solver_config=SolverConfig(), att
     return recovered, found
 
 
-def evaluate(recovered, found: SearchResult | None, truth, tokenizer, generator):
+def evaluate(recovered, found: SearchResult | None, truth, tokenizer, generator, true_time):
     """Score the recovery against the generator's truth (never used during recovery).
 
     Top-level token scores are for the selected restart; ``stage_b_restarts`` scores every restart.
+    ``true_time`` is the declared sampler time (public metadata, not part of ``truth``).
     """
     tokens = np.asarray(truth["tokens"])
     chosen = None if found is None else found.selected
@@ -88,6 +91,9 @@ def evaluate(recovered, found: SearchResult | None, truth, tokenizer, generator)
         "true_tokens": tokens,
         "prompt_code_error": float(np.linalg.norm(np.asarray(recovered.prompt_code) - truth["prompt_code"])),
         "noise_code_error": float(np.linalg.norm(np.asarray(recovered.noise_code) - truth["noise_code"])),
+        "recovered_time": recovered.recovered_time,
+        "true_time": true_time,
+        "time_error": abs(recovered.recovered_time - true_time),
         "stage_b_exact_tokens": bool(chosen is not None and np.array_equal(chosen.tokens, tokens)),
         "stage_b_token_accuracy": float(np.mean(chosen.tokens == tokens)) if chosen is not None else 0.0,
         "stage_b_restarts": per_restart,
@@ -99,7 +105,7 @@ def evaluate(recovered, found: SearchResult | None, truth, tokenizer, generator)
 
 
 def invert_observation(observation: Observation, adapter, *, solver=SolverConfig(), search=None,
-                       start_tokens=None, progress=None) -> InversionResult:
+                       start_tokens=None, progress=None, knowledge=AttackerKnowledge()) -> InversionResult:
     """Recover the prompt of one hidden state.
 
     ``search`` defaults to ``AttackConfig(mode="projected")``; its ``restarts`` and
@@ -110,22 +116,24 @@ def invert_observation(observation: Observation, adapter, *, solver=SolverConfig
     metadata = observation.metadata
     adapter = adapter.with_prompt_length(metadata.prompt_length)
     recovered, found = run_stages(observation.hidden_state, adapter, metadata, solver, search,
-                                  start_tokens=start_tokens, progress=progress)
+                                  start_tokens=start_tokens, progress=progress, knowledge=knowledge)
     evaluation = None
     if observation.truth is not None:
-        evaluation = evaluate(recovered, found, observation.truth, adapter.tokenizer, observation.generator)
+        evaluation = evaluate(recovered, found, observation.truth, adapter.tokenizer, observation.generator,
+                              metadata.time)
     texts = () if found is None else tuple(adapter.tokenizer.decode(r.tokens) for r in found.restarts)
     return InversionResult(observation, recovered, found, texts, evaluation)
 
 
 def invert_prompt(prompt, adapter, *, observation_layer, noise_seed=100, self_cond_cfg_scale=1.0,
                   attention_mask=None, time=0.0, sampling_steps=SAMPLING_STEPS, solver=SolverConfig(),
-                  search=None, start_tokens=None, progress=None) -> InversionResult:
+                  search=None, start_tokens=None, progress=None, knowledge=AttackerKnowledge()) -> InversionResult:
     """Generate ELF's hidden state for ``prompt`` (text or token IDs), then invert it.
 
     The prompt is only used to create the hidden state and, afterwards, to fill
     ``result.evaluation``; recovery itself sees the hidden state and metadata only.
-    ``time`` > 0 observes a later sampler call (see ``generate``); Stage A knows the time.
+    ``time`` > 0 observes a later sampler call (see ``generate``); Stage A uses it only if
+    ``knowledge.knows_time``, otherwise it recovers the time as one more unknown.
     """
     report = progress or (lambda *args, **kwargs: None)
     tokens = (prompt_tokens(adapter, prompt=prompt) if isinstance(prompt, str)
@@ -137,4 +145,4 @@ def invert_prompt(prompt, adapter, *, observation_layer, noise_seed=100, self_co
                                     time=time, sampling_steps=sampling_steps)
     report("observation_done", "Hidden state generated")
     return invert_observation(observation, adapter, solver=solver, search=search, start_tokens=start_tokens,
-                              progress=progress)
+                              progress=progress, knowledge=knowledge)
