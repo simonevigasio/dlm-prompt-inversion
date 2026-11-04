@@ -19,7 +19,7 @@ synthetic_observation:
 #   because the first sampling pass is always at time 0.
 attacker_knowledge:
   # observed_rows: "generated"
-  # knows_noise_scale: False
+  knows_noise_scale: False
 
 # Runs per prompt. Repetition r of prompt id uses seeds hash(purpose, seed, id, r) for the
 # noise and for Stage A/B starts (the seeds above and in the stage files are salts), so no
