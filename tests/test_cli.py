@@ -155,6 +155,53 @@ class PipelineCommandTests(unittest.TestCase):
                 with self.subTest(repetitions=repetitions), self.assertRaises(ValueError):
                     load_config(self.write_config(root, repetitions=repetitions))
 
+    def test_dataset_run_resumes_after_crash(self):
+        """A run stopped mid-dataset resumes at the first unfinished (prompt, repetition)."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = self.write_config(root, repetitions=2)
+            dataset = self.write_dataset(root, {"id": "a", "text": "4"}, {"id": "b", "text": "5"})
+            output = root / "crashed"
+            command = ["--config", str(config), "--dataset", str(dataset), "--output", str(output)]
+            results = output / "results.jsonl"
+
+            # The hardware "stops" during the third unit, (b, 0): (a, 0) and (a, 1) are already saved.
+            calls = []
+
+            def crash_on_third(*args, **kwargs):
+                calls.append(kwargs["noise_seed"])
+                if len(calls) == 3:
+                    raise RuntimeError("simulated hardware stop")
+                return invert_prompt(*args, **kwargs)
+
+            with patch("elf_inversion.models.elf.adapter.ELFAdapter.from_config", return_value=text_adapter()), \
+                    patch("elf_inversion.cli.invert_prompt", side_effect=crash_on_third):
+                with self.assertRaisesRegex(RuntimeError, "simulated hardware stop"):
+                    main(command)
+            saved = results.read_text().splitlines()
+            self.assertEqual([(r["example_id"], r["repetition"]) for r in map(json.loads, saved)],
+                             [("a", 0), ("a", 1)])
+            events = [json.loads(line)["event"] for line in (output / "progress.jsonl").read_text().splitlines()]
+            self.assertEqual(events[-1], "run_failed")
+
+            # A crash in the middle of a write leaves a partial last line; resuming discards it.
+            with open(results, "a", encoding="utf-8") as handle:
+                handle.write('{"example_id": "b", "repe')
+
+            with patch("elf_inversion.models.elf.adapter.ELFAdapter.from_config", return_value=text_adapter()), \
+                    patch("elf_inversion.cli.invert_prompt", wraps=invert_prompt) as invert:
+                main(command)
+            loaded = load_config(config)
+            # Only the two unfinished units ran, with the same seeds an uninterrupted run would use.
+            self.assertEqual([call.kwargs["noise_seed"] for call in invert.call_args_list],
+                             [repetition_seeds(loaded, "b", r)["noise"] for r in (0, 1)])
+            lines = results.read_text().splitlines()
+            self.assertEqual(lines[:2], saved)  # completed rows are never rewritten
+            self.assertEqual([(r["example_id"], r["repetition"]) for r in map(json.loads, lines)],
+                             [("a", 0), ("a", 1), ("b", 0), ("b", 1)])
+            summary = json.loads((output / "summary.json").read_text())
+            self.assertEqual((summary["completed"], summary["pending"]), (4, 0))
+
     def test_forward_mismatch_retries_noise_then_skips(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
