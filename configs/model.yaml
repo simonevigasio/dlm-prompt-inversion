@@ -1,6 +1,7 @@
 # Pinned ELF source, tokenizer, encoder and denoiser checkpoint, shared by both stages.
-# elf_root is relative to this file: the official ELF checkout next to this repository.
-elf_root: ../../ELF
+# elf_root is relative to this file: the official ELF source, a git submodule of this repository.
+# Fetch it with `git submodule update --init`; its recorded commit must equal elf_commit.
+elf_root: ../src/elf_inversion/models/elf/upstream
 elf_commit: 5098bf28b5e9b52c329970a7e4e1cc28251c76e6
 elf_config: src/configs/training_configs/train_de-en_ELF-B.yml
 tokenizer:

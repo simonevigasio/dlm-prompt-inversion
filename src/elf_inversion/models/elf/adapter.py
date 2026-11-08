@@ -45,7 +45,7 @@ RELEASE_CONFIG_FIELDS = ("encoder_model_name", "encoder_checkpoint", "latent_mea
 def _check_pinned_commit(root: Path, expected_commit: str):
     commit = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
     if commit != expected_commit:
-        raise ValueError(f"ELF commit mismatch: {commit} != {expected_commit}")
+        raise ValueError(f"ELF commit mismatch: {commit} != {expected_commit}, use 'git submodule update --init' to reset the submodule commit")
     if subprocess.check_output(["git", "-C", str(root), "diff", "HEAD", "--", "src"], text=True):
         raise ValueError("ELF tracked source differs from the pinned commit")
 
@@ -70,11 +70,14 @@ def _check_native_namespaces_free(src: Path):
             raise RuntimeError(f"Import namespace {name} is already occupied by non-ELF code")
 
 
-def native_modules(root: Path, expected_commit: str | None = None):
+def native_modules(root: Path, expected_commit: str):
     """Import upstream read-only; reject ambiguous imports or changed tracked source."""
     root = root.resolve()
-    if expected_commit:
-        _check_pinned_commit(root, expected_commit)
+    if not (root / ".git").exists():
+        raise FileNotFoundError("ELF source missing, run 'git submodule update --init'")
+    if not expected_commit:
+        raise ValueError("expected commit required for consistency in experiments")
+    _check_pinned_commit(root, expected_commit)
 
     src = root / "src"
     if not (src / "modules/t5_encoder.py").is_file():

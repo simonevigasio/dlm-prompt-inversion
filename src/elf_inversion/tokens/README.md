@@ -1,96 +1,51 @@
-# Stage B: discrete prompt inversion
+# Stage B: token search
 
-Stage B searches for prompt tokens whose ELF representation matches a target:
-the projected bottleneck code from Stage A, or an encoder/projected code
-computed from known tokens. One call handles one prompt.
+Find prompt tokens whose ELF code matches a target: usually Stage A's `zeta_p`.
 
 ```text
-elf_inversion/tokens/
-  attack.py      greedy gradient-shortlisted, exact-loss single-token search
-  search.py      random restarts of the attack; keeps the lowest final loss
-  data.py        replacement vocabulary and single-prompt validation
-tests/tokens/    search tests on a tiny fake model; no ELF or checkpoints
+tokens/
+  attack.py   one greedy search from given start tokens
+  search.py   random restarts of the attack; keeps the lowest loss
+  data.py     replacement vocabulary and prompt validation
 ```
 
 ```python
-from elf_inversion.tokens.attack import AttackConfig, attack
+from elf_inversion.tokens.attack import AttackConfig
 from elf_inversion.tokens.search import search
 
-result = attack(target_codes, initial_tokens, adapter, AttackConfig(mode="projected", k=100))
-result.tokens, result.final_loss, result.stop_reason
-
-found = search(target_codes, adapter, AttackConfig(mode="projected", k=100, restarts=5))
-found.tokens, found.final_loss, found.selected_restart, found.restarts
+found = search(target, adapter, AttackConfig(mode="projected", k=100, restarts=5))
+found.tokens, found.final_loss, found.selected_restart
 ```
 
-`attack` runs one search from given tokens. `search` is Stage B's counterpart of
-Stage A's restarts: `restarts` attacks from random non-special tokens with seeds
-`seed + restart` (both in `AttackConfig`), selecting the lowest final loss.
-With `stop_restarts_at_tolerance` (default `true`), the first restart whose loss
-reaches `stopping_loss_tolerance` ends the search and the remaining restarts are
-skipped; `found.restarts` then holds only the restarts that ran.
+## Target
 
-The attack receives only the target, the initial tokens and the model
-(`elf_inversion.models.elf.adapter.ELFAdapter`); no ground truth. Search
-settings: `configs/stage_b/`, which list only values that differ from the
-`AttackConfig` defaults. The full pipeline that uses Stage B is
-`elf_inversion.pipeline`; its command is `elf_inversion.cli`.
+- **projected** (used by the pipeline): the 128-dim bottleneck code,
+  `C (Wz + Ws) W1 + c`, the same quantity Stage A recovers.
+- **encoder**: the T5 encoder output `C` itself, with 512 features per token.
 
-## Representations
-
-`ELFAdapter` uses ELF's native encoder weights, normalization, and attention
-masks. The 128-token input contains the prompt, one valid EOS filler, and EOS
-padding. Conditioning queries attend only to the prompt, so filler and padding
-cannot influence the representation.
-
-- **encoder** codes are contextual, position-preserving matrices with 512 features per prompt token.
-- **projected** codes have 128 features. Native sampling restores the encoder
-  code `C` into both prompt channels of the self-conditioning projection. With
-  Flax's row-vector convention:
-
-```text
-Gamma = (W_Z + W_S) @ W_b1
-beta = b_SC @ W_b1
-projected code = C @ Gamma + beta
-```
-
-`ELFAdapter.project` preserves the native multiplication order and includes the
-bias; `gamma` and `projection_bias` expose the equivalent affine parameters.
-`reference_projected` captures the native full-model result for verification.
+The prompt is padded with one EOS and EOS padding; the encoder mask keeps the padding
+from affecting the prompt's code.
 
 ## Search
 
-The attack minimizes mean squared error over every prompt row. Each iteration:
+The loss is the mean squared error between the tokens' code and the target. Each iteration:
 
-1. computes the input-embedding gradient at the current tokens;
-2. shortlists the K best-scoring replacement tokens at **every** editable position;
-3. evaluates the exact loss of all those single substitutions, in bounded batches;
-4. accepts the lowest-loss strict improvement (ties: position, then token ID).
+1. takes the gradient of the loss with respect to the input embeddings;
+2. uses it to shortlist the `k` most promising replacement tokens at every position;
+3. computes the exact loss of every single-token swap in the shortlist;
+4. keeps the best swap if it lowers the loss, otherwise stops.
 
-Acceptance requires `old - new > acceptance_atol + acceptance_rtol * abs(old)`.
-Parameters, special tokens, suffix, masks, and prompt length remain fixed.
+The search also stops at `stopping_loss_tolerance`, `max_iterations` or
+`max_candidate_evaluations` (keep it ≥ `prompt_length × k × max_iterations`). With
+restarts, each starts from random tokens (seed `seed + restart`); by default the first
+restart that reaches the tolerance ends the search.
 
-The candidate budget counts sequences, not batches. An iteration starts only
-when its complete shortlist fits the remaining budget, so keep
-`max_candidate_evaluations >= editable_positions * k * max_iterations`.
-Stop reasons: `loss_tolerance`, `no_improvement`, `max_iterations`,
-`candidate_budget`, `no_candidates`, `no_editable_positions`.
-
-`warmup=True` separates JIT compilation from search timing.
-`exhaustive_single_token_neighborhood` is an optional frozen-center
-diagnostic; its result never changes the search.
+Settings: `AttackConfig` in `attack.py`; `configs/stage_b/` lists only changed values.
 
 ## Tests
 
 ```bash
-.venv/bin/python -m unittest discover -s tests/tokens -t . -v
+.venv/bin/python -m unittest discover -s tests/tokens -t .
 ```
 
-These cover shortlisting, frozen-center batches, exact best-candidate selection,
-acceptance tolerances, budget accounting, fixed special tokens, the exhaustive
-diagnostic and progress events. Adapter forward-equivalence tests
-are in `tests/model`.
-
-For debugging in VS Code, use the "Corruption: debug" launch profiles; useful
-breakpoints are the gradient and candidate-selection steps in `attack.py` and
-`ELFAdapter.project`. Set `JAX_DISABLE_JIT=1` to step through Python forwards.
+They use a tiny fake model and need neither ELF nor checkpoints.
