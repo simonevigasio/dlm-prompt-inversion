@@ -6,7 +6,7 @@
     python3 run_pipeline.py --help
 
 Works from any directory. Re-runs itself with the repository's .venv interpreter
-when one exists. Details: src/elf_inversion/cli.py.
+when one exists. Details: src/cli.py.
 """
 import os
 from pathlib import Path

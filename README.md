@@ -4,9 +4,9 @@ Recover the prompt given to a continuous diffusion language model from one of it
 states. The attack is model-independent; two victim models are implemented:
 ELF (Embedded Language Flows) and [DiffuSeq](https://github.com/Shark-NLP/DiffuSeq).
 
-1. **[Stage A](src/elf_inversion/backbone/README.md)**: hidden state → codes of the prompt
+1. **[Stage A](src/backbone/README.md)**: hidden state → codes of the prompt
    (ELF: bottleneck codes; DiffuSeq: token embeddings).
-2. **[Stage B](src/elf_inversion/tokens/README.md)**: codes → prompt tokens.
+2. **[Stage B](src/tokens/README.md)**: codes → prompt tokens.
 
 ```text
 run_pipeline.py          run an experiment: dataset → Stage A → Stage B → scores
@@ -15,7 +15,7 @@ configs/
   diffuseq.yaml          DiffuSeq: pinned commit and checkpoint (family: diffuseq)
   pipeline/              experiments: model + stage files + observation + attacker knowledge
   stage_a/, stage_b/     solver / search settings (only values that differ from the defaults)
-src/elf_inversion/
+src/                     the Python package, imported as elf_inversion
   models/                victim models; interface.py is what the attack needs from one
     elf/                 ELF adapter and forward map; upstream/ is the ELF git submodule
     diffuseq/            DiffuSeq adapter and forward map; upstream/ is the DiffuSeq git submodule

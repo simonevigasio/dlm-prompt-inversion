@@ -1,5 +1,5 @@
 # Stage B: larger greedy token search (100 candidates per position, 50 accepted swaps).
-# Unlisted settings use the AttackConfig defaults (src/elf_inversion/tokens/attack.py).
+# Unlisted settings use the AttackConfig defaults (src/tokens/attack.py).
 # Keep max_candidate_evaluations >= prompt_length * k * max_iterations; an iteration
 # starts only when its whole shortlist fits the remaining budget.
 k: 100

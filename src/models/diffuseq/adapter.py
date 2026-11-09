@@ -37,7 +37,7 @@ from .forward import BackboneForward, ForwardMetadata
 from .setup import BackboneSetup
 
 Mode = Literal["encoder", "projected"]
-REPO_ROOT = Path(__file__).resolve().parents[4]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_SETTINGS = REPO_ROOT / "configs" / "diffuseq.yaml"
 # Upstream modules used here; they live in the "diffuseq" package of the checkout.
 UPSTREAM_MODULES = ("transformer_model", "gaussian_diffusion", "rounding")

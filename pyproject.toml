@@ -29,4 +29,4 @@ packages = ["elf_inversion", "elf_inversion.models", "elf_inversion.models.elf",
             "elf_inversion.tokens", "elf_inversion.datasets"]
 
 [tool.setuptools.package-dir]
-elf_inversion = "src/elf_inversion"
+elf_inversion = "src"

@@ -18,7 +18,7 @@ from transformers import AutoTokenizer
 
 from ..models.elf.adapter import read_settings
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = REPO_ROOT / "data" / "dolly"
 REPO = "databricks/databricks-dolly-15k"
 REVISION = "bdd27f4d94b9c1f951818a7da7fd7aeea5dbff1a"

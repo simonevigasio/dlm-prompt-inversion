@@ -68,7 +68,7 @@ from .runs import (append_result, canonical, digest, file_sha256, json_safe, loc
 from .tokens.attack import AttackConfig
 from .backbone.knowledge import AttackerKnowledge
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[1]
 # synthetic_observation keys every family accepts; each family adds its OBSERVATION_OPTIONS.
 SYNTHETIC_KEYS = {"observation_layer", "noise_seed", "time", "sampling_steps"}
 RESULT_KEY = ("example_id", "repetition")

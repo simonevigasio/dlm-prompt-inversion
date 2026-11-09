@@ -3,7 +3,7 @@
 # not with the solver, so the same settings work for every layer.
 #
 # Every setting uses its default from SolverConfig
-# (src/elf_inversion/backbone/solver.py); list here only what should differ, e.g.
+# (src/backbone/solver.py); list here only what should differ, e.g.
 #   restarts: 5
 #   max_iterations: 100
 # The full effective settings of each run are saved in its manifest.json.

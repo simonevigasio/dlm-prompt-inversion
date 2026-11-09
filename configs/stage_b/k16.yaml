@@ -1,5 +1,5 @@
 # Stage B: small greedy token search (16 candidates per position, 20 accepted swaps).
-# Unlisted settings use the AttackConfig defaults (src/elf_inversion/tokens/attack.py):
+# Unlisted settings use the AttackConfig defaults (src/tokens/attack.py):
 # mode projected, k 16, candidate_batch_size 32, restarts 1, seed 200. Add e.g.
 # "restarts: 5" for 5 random starts on one Stage A result (start seeds seed + restart).
 max_iterations: 20

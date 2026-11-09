@@ -29,7 +29,7 @@ from elf_inversion.models.elf.forward import BackboneForward, ForwardMetadata
 from elf_inversion.models.elf.setup import BackboneSetup
 
 Mode = Literal["encoder", "projected"]
-REPO_ROOT = Path(__file__).resolve().parents[4]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_SETTINGS = REPO_ROOT / "configs" / "model.yaml"
 
 # Upstream ELF modules used here, by short name; they live under <ELF>/src.
