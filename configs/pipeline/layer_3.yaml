@@ -21,6 +21,17 @@ attacker_knowledge:
   # observed_rows: "generated"
   knows_noise_scale: False
 
+# Victim denoiser (the section and every field are optional; default = released checkpoint):
+# weights: "checkpoint" or "random"; bottleneck: False (square text projection) needs "random"
+# init: "upstream" (checkpoint only) or "normal" (random only), every weight drawn from N(0, init_std^2)
+# init_seed: rebuilds the same random model; part of the run identity, so resume never mixes models
+# backbone:
+#   weights: random
+#   bottleneck: False
+#   init: normal
+#   init_std: 0.02
+#   init_seed: 0
+
 # Runs per prompt. Repetition r of prompt id uses seeds hash(purpose, seed, id, r) for the
 # noise and for Stage A/B starts (the seeds above and in the stage files are salts), so no
 # seed is shared across prompts or repetitions. Results are keyed by (example_id, repetition).

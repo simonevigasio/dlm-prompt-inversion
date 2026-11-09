@@ -10,7 +10,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from elf_inversion.models.elf.adapter import ELFAdapter, _from_hub, native_modules, read_settings
+from elf_inversion.models.elf.adapter import (ELFAdapter, _from_hub, _random_denoiser_params,
+                                             native_modules, read_settings)
+from elf_inversion.models.elf.setup import BackboneSetup
+from elf_inversion.models.elf.testing import tiny_native_adapter
 
 
 class TinyTokenizer:
@@ -182,6 +185,58 @@ class HubLoadingModes(unittest.TestCase):
             _from_hub(missing, True)
         with self.assertRaises(ValueError):
             _from_hub(missing, "yes")
+
+
+class RandomDenoiserParams(unittest.TestCase):
+    """Random victim weights: same tree as model.init, reproducible from init_seed."""
+
+    @classmethod
+    def setUpClass(cls):
+        tiny = tiny_native_adapter()
+        cls.model, cls.config, cls.reference = tiny.model, tiny.config, tiny.model_params
+
+    def draw(self, **fields):
+        setup = BackboneSetup(weights="random", init="normal", **fields)
+        return _random_denoiser_params(self.model, self.config, setup)
+
+    def test_same_tree_and_shapes_as_model_init(self):
+        params, _ = self.draw()
+        shapes = lambda tree: jax.tree_util.tree_map(jnp.shape, flax.core.unfreeze(tree))
+        self.assertEqual(shapes(params), shapes(self.reference))
+
+    def test_same_seed_rebuilds_the_same_model(self):
+        first, _ = self.draw(init_seed=7)
+        second, _ = self.draw(init_seed=7)
+        for a, b in zip(jax.tree_util.tree_leaves(first), jax.tree_util.tree_leaves(second)):
+            np.testing.assert_array_equal(a, b)
+
+    def test_different_seed_gives_a_different_model(self):
+        first, _ = self.draw(init_seed=7)
+        second, _ = self.draw(init_seed=8)
+        a, b = first["text_proj"]["proj1"]["kernel"], second["text_proj"]["proj1"]["kernel"]
+        self.assertFalse(np.array_equal(a, b))
+
+    def test_leaves_have_their_own_keys(self):
+        params, _ = self.draw()
+        k1 = params["text_proj"]["proj1"]["kernel"].ravel()
+        k2 = params["text_proj"]["proj2"]["kernel"].ravel()
+        n = min(k1.size, k2.size)
+        self.assertFalse(np.array_equal(k1[:n], k2[:n]))
+
+    def test_spread_follows_init_std(self):
+        params, _ = self.draw(init_std=0.5)
+        values = np.concatenate([np.ravel(x) for x in jax.tree_util.tree_leaves(params)])
+        self.assertAlmostEqual(float(values.std()), 0.5, delta=0.05)
+        self.assertAlmostEqual(float(values.mean()), 0.0, delta=0.05)
+
+    def test_provenance_records_the_setup(self):
+        _, provenance = self.draw(init_std=0.1, init_seed=3)
+        self.assertEqual(provenance, {"weights": "random", "init": "normal",
+                                      "init_std": 0.1, "init_seed": 3})
+
+    def test_rejects_checkpoint_setup(self):
+        with self.assertRaises(ValueError):
+            _random_denoiser_params(self.model, self.config, BackboneSetup())
 
 
 if __name__ == "__main__":

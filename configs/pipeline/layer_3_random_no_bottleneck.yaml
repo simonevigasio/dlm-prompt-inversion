@@ -1,0 +1,23 @@
+# Same as layer_3.yaml, but the victim is a randomly initialized ELF without the bottleneck:
+# the text projection is square (512 -> 512 -> 768), so the input map is one-to-one.
+# Paths are relative to this file.
+model: ../model.yaml
+stage_a: ../stage_a/levenberg_marquardt.yaml
+stage_b: ../stage_b/k100.yaml
+
+synthetic_observation:
+  observation_layer: 3
+  noise_seed: 100
+
+attacker_knowledge:
+  knows_noise_scale: False
+
+# Victim denoiser: see layer_3.yaml for every option.
+backbone:
+  weights: random
+  bottleneck: False
+  init: normal
+  init_std: 0.02
+  init_seed: 0
+
+repetitions: 5

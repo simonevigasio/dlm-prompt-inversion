@@ -13,6 +13,7 @@ from elf_inversion.backbone.recovery import recover
 from elf_inversion.backbone.solver import SolverConfig
 from elf_inversion.cli import (FORWARD_MISMATCH, NOISE_ATTEMPTS, load_config, main, repetition_seeds,
                                retry_noise_seed)
+from elf_inversion.models.elf.setup import BackboneSetup
 from elf_inversion.models.elf.testing import tiny_native_adapter
 from elf_inversion.observation import ForwardMismatch
 from elf_inversion.pipeline import invert_prompt
@@ -302,6 +303,60 @@ class PipelineCommandTests(unittest.TestCase):
             self.assertEqual(observation.shape[1], forward.length - 1)
             manifest = json.loads((root / "run/manifest.json").read_text())
             self.assertEqual(manifest["configuration"]["attacker_knowledge"]["observed_rows"], "generated")
+
+    def test_backbone_config(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            # No section: the released checkpoint, as before the feature existed.
+            config = load_config(self.write_config(root))
+            self.assertEqual(config.backbone, BackboneSetup())
+            self.assertEqual(config.resolved["backbone"], {"weights": "checkpoint", "bottleneck": True,
+                                                           "init": "upstream", "init_std": 0.02, "init_seed": 0})
+            section = {"weights": "random", "bottleneck": False, "init": "normal", "init_seed": 4}
+            config = load_config(self.write_config(root, backbone=section))
+            self.assertEqual(config.backbone, BackboneSetup(**section))
+            # The manifest records every field, defaults included.
+            self.assertEqual(config.resolved["backbone"], {**section, "init_std": 0.02})
+            # Bad combinations are rejected by BackboneSetup; unknown fields by the dataclass itself.
+            for bad in ({"bottleneck": False}, {"weights": "random"}, {"init": "normal"},
+                        {"weights": "random", "init": "normal", "init_std": 0}, {"colour": "red"}):
+                with self.subTest(backbone=bad), self.assertRaises((ValueError, TypeError)):
+                    load_config(self.write_config(root, backbone=bad))
+
+    def test_backbone_reaches_the_model(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            section = {"weights": "random", "bottleneck": False, "init": "normal", "init_seed": 4}
+            config = self.write_config(root, backbone=section)
+            dataset = self.write_dataset(root, {"id": "a", "text": "4"})
+            with patch("elf_inversion.models.elf.adapter.ELFAdapter.from_config",
+                       return_value=text_adapter()) as from_config:
+                main(["--config", str(config), "--dataset", str(dataset), "--output", str(root / "run")])
+            self.assertEqual(from_config.call_args.kwargs["setup"], BackboneSetup(**section))
+            manifest = json.loads((root / "run/manifest.json").read_text())
+            self.assertEqual(manifest["configuration"]["backbone"]["init_seed"], 4)
+
+    def test_resume_refuses_a_changed_backbone(self):
+        """A run resumes only on the same victim model: any backbone change is a new experiment."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            section = {"weights": "random", "init": "normal", "init_seed": 4}
+            config = self.write_config(root, backbone=section)
+            dataset = self.write_dataset(root, {"id": "a", "text": "4"})
+            command = ["--config", str(config), "--dataset", str(dataset), "--output", str(root / "run")]
+            with patch("elf_inversion.models.elf.adapter.ELFAdapter.from_config", return_value=text_adapter()):
+                main(command)
+                # Same setup: resumes (here nothing is left to do).
+                main(command)
+                for change in ({"init_seed": 5}, {"init_std": 0.1}, {"bottleneck": False}):
+                    with self.subTest(change=change):
+                        self.write_config(root, backbone={**section, **change})
+                        with self.assertRaisesRegex(ValueError, "Resume identity mismatch"):
+                            main(command)
+                # Back to the checkpoint is a different model too.
+                self.write_config(root)
+                with self.assertRaisesRegex(ValueError, "Resume identity mismatch"):
+                    main(command)
 
 if __name__ == "__main__":
     unittest.main()

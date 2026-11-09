@@ -2,12 +2,14 @@
 
 ``ELFAdapter.from_config()`` loads the pinned tokenizer, T5 encoder and ELF
 denoiser described by ``configs/model.yaml``, after checking the ELF checkout
-and checkpoint configuration. Generic pretrained T5 weights are never loaded.
+and checkpoint configuration. A ``BackboneSetup`` can replace the released
+denoiser with random weights, with or without the bottleneck. Generic
+pretrained T5 weights are never loaded.
 """
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 import importlib
 import os
 from pathlib import Path
@@ -20,6 +22,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import yaml
+
+from elf_inversion.models.elf.setup import BackboneSetup
 
 Mode = Literal["encoder", "projected"]
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -163,6 +167,41 @@ def _load_denoiser_params(native, config, spec, offline):
     return params, {"checkpoint_path": checkpoint_path, "step": int(state["step"]),
                     "epoch": float(state["epoch"])}
 
+def _random_denoiser_params(model, config, setup: BackboneSetup):
+    """Denoiser parameters drawn from ``setup`` instead of the released checkpoint.
+
+    The parameter tree (names and shapes) is the one upstream's ``model.init``
+    builds in eval.py; every leaf is then redrawn from N(0, init_std^2) with its
+    own key, so the same init_seed always rebuilds the same model.
+
+    Returns the parameters and their provenance, like ``_load_denoiser_params``.
+    """
+    if setup.weights != "random" or setup.init != "normal":
+        raise ValueError('Random denoiser parameters need weights="random" and init="normal"')
+    # Pseudo random key that every weight is drawn from: one key per init_seed.
+    rng = jax.random.PRNGKey(setup.init_seed)
+    rng, init_rng = jax.random.split(rng)
+    # Dummy inputs exactly as upstream eval.py: only their shapes matter.
+    # A 2x wide x makes model.init create self_cond_proj.
+    text_dim = model.text_encoder_dim
+    input_dim = 2 * text_dim if config.self_cond_prob > 0 else text_dim
+    args = dict(
+        x=jnp.ones((1, config.max_length, input_dim)),
+        t=jnp.ones((1,)),
+        deterministic=True,  # disable dropout
+        self_cond_cfg_scale=jnp.ones((1,)) if config.num_self_cond_cfg_tokens > 0 else None,
+    )
+    # eval_shape traces model.init without computing any values: we only need
+    # the tree structure and each leaf's shape/dtype, since every leaf is redrawn.
+    shapes = jax.eval_shape(lambda: model.init(init_rng, **args))["params"]
+    leaves, treedef = jax.tree_util.tree_flatten(shapes)
+    # tree_flatten has a fixed (sorted-key) order, so leaf i always gets the same key.
+    drawn = [setup.init_std * jax.random.normal(jax.random.fold_in(rng, i), leaf.shape, leaf.dtype)
+             for i, leaf in enumerate(leaves)]
+    params = jax.tree_util.tree_unflatten(treedef, drawn)
+    return params, {"weights": setup.weights, "init": setup.init,
+                    "init_std": setup.init_std, "init_seed": setup.init_seed}
+
 
 @dataclass(frozen=True)
 class PromptBatch:
@@ -222,7 +261,12 @@ class ELFAdapter:
 
     @classmethod
     def from_config(cls, path=DEFAULT_SETTINGS, *, projected=True,
-                    local_files_only=None):
+                    local_files_only=None, setup: BackboneSetup = BackboneSetup()):
+        """``setup`` picks the victim denoiser: released checkpoint (default) or
+        random weights, with or without the bottleneck. The encoder is always the
+        pretrained one."""
+        if not projected and setup != BackboneSetup():
+            raise ValueError("A backbone setup needs projected=True: encoder mode loads no denoiser")
         from huggingface_hub import hf_hub_download
         from transformers import AutoTokenizer
 
@@ -249,9 +293,9 @@ class ELFAdapter:
 
         model, params = None, None
         if projected:
-            spec = settings["denoiser"]
-            params, checkpoint_provenance = _load_denoiser_params(native, config, spec, offline)
-            provenance.update(denoiser=spec, **checkpoint_provenance)
+            if not setup.bottleneck:
+                # Square text projection (d_model -> d_model): proj1 can be invertible.
+                config.bottleneck_dim = ec.d_model
             model = native["model"].ELF_models[config.model](
                 text_encoder_dim=ec.d_model, max_length=config.max_length,
                 attn_drop=config.attn_dropout, proj_drop=config.proj_dropout,
@@ -260,6 +304,13 @@ class ELFAdapter:
                 num_model_mode_tokens=config.num_model_mode_tokens,
                 vocab_size=tokenizer.vocab_size,  # exactly eval.py
             )
+            if setup.weights == "checkpoint":
+                spec = settings["denoiser"]
+                params, denoiser_provenance = _load_denoiser_params(native, config, spec, offline)
+                provenance.update(denoiser=spec)
+            else:
+                params, denoiser_provenance = _random_denoiser_params(model, config, setup)
+            provenance.update(backbone=asdict(setup), **denoiser_provenance)
         return cls(native=native, config=config, tokenizer=tokenizer, encoder=encoder,
                    encoder_params=enc_params, prompt_length=settings["prompt_length"],
                    filler_token_ids=settings["filler_token_ids"], model=model,

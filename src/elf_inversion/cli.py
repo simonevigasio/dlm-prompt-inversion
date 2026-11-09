@@ -64,6 +64,7 @@ from .runs import (append_result, canonical, digest, file_sha256, json_safe, loc
                    read_results, write_manifest)
 from .tokens.attack import AttackConfig
 from .backbone.knowledge import AttackerKnowledge
+from .models.elf.setup import BackboneSetup
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SYNTHETIC_KEYS = {"observation_layer", "noise_seed", "self_cond_cfg_scale", "attention_mask", "time",
@@ -83,6 +84,7 @@ class PipelineConfig:
     synthetic_observation: dict  # how each dataset prompt's hidden state is generated
     repetitions: int  # runs per prompt, each with seeds derived from (prompt id, repetition)
     attacker_knowledge: AttackerKnowledge
+    backbone: BackboneSetup  # victim denoiser: checkpoint or random weights, bottleneck on/off
     resolved: dict  # every setting, with the stage files inlined, for the manifest
     
 
@@ -91,12 +93,14 @@ def load_config(path):
     path = Path(path).resolve()
     raw = yaml.safe_load(path.read_text())
     required = {"model", "stage_a", "stage_b", "synthetic_observation"}
-    if not required <= raw.keys() <= required | {"repetitions", "attacker_knowledge"}:
-        raise ValueError(f"{path}: needs exactly {sorted(required)}, optionally repetitions and attacker_knowledge")
+    if not required <= raw.keys() <= required | {"repetitions", "attacker_knowledge", "backbone"}:
+        raise ValueError(f"{path}: needs exactly {sorted(required)}, optionally repetitions, attacker_knowledge and backbone")
     repetitions = raw.get("repetitions", 1)
     if type(repetitions) is not int or repetitions < 1:
         raise ValueError(f"{path}: repetitions must be an integer >= 1")
     knowledge = AttackerKnowledge(**(raw.get("attacker_knowledge") or {}))
+    # No section: the released checkpoint, as before the feature existed.
+    backbone = BackboneSetup(**(raw.get("backbone") or {}))
     # Stage files list only what differs from the SolverConfig/AttackConfig defaults.
     stage_a = yaml.safe_load((path.parent / raw["stage_a"]).read_text()) or {}
     stage_b = yaml.safe_load((path.parent / raw["stage_b"]).read_text()) or {}
@@ -110,9 +114,13 @@ def load_config(path):
         raise ValueError(f"synthetic_observation needs observation_layer; allowed keys: {sorted(SYNTHETIC_KEYS)} "
                          "(prompts come from the --dataset file)")
     # The manifest records every effective value, defaults included, not just the file contents.
+    # The backbone setup is part of the resume identity: a changed victim model (weights,
+    # bottleneck, init_std, init_seed) never resumes into an existing run directory.
     return PipelineConfig(path, (path.parent / raw["model"]).resolve(), solver, search, synthetic, repetitions, knowledge,
+                          backbone,
                           {**raw, "repetitions": repetitions, "stage_a": asdict(solver), "stage_b": asdict(search),
-                           "stage_a_file": raw["stage_a"], "stage_b_file": raw["stage_b"], "attacker_knowledge": asdict(knowledge)})
+                           "stage_a_file": raw["stage_a"], "stage_b_file": raw["stage_b"], "attacker_knowledge": asdict(knowledge),
+                           "backbone": asdict(backbone)})
 
 
 def generation_options(synthetic):
@@ -212,8 +220,11 @@ def main(argv=None):
 
 
 def load_adapter(config, report):
-    report("model_loading_start", "Loading pinned ELF weights (local_files_only from the model settings)")
-    adapter = ELFAdapter.from_config(config.model, projected=True)
+    setup = config.backbone
+    weights = "pinned ELF checkpoint" if setup.weights == "checkpoint" else f"random ELF weights (init_seed {setup.init_seed})"
+    report("model_loading_start", f"Loading {weights}, bottleneck {'on' if setup.bottleneck else 'off'} "
+           "(local_files_only from the model settings)", backbone=asdict(setup))
+    adapter = ELFAdapter.from_config(config.model, projected=True, setup=setup)
     report("model_loading_done", "Model loaded")
     return adapter
 
