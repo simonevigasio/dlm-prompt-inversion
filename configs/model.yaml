@@ -1,4 +1,5 @@
 # Pinned ELF source, tokenizer, encoder and denoiser checkpoint, shared by both stages.
+family: elf
 # elf_root is relative to this file: the official ELF source, a git submodule of this repository.
 # Fetch it with `git submodule update --init`; its recorded commit must equal elf_commit.
 elf_root: ../src/elf_inversion/models/elf/upstream

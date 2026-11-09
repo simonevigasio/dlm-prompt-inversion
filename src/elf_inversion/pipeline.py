@@ -1,4 +1,7 @@
-"""End-to-end inversion: ELF hidden state -> Stage A (bottleneck codes) -> Stage B (tokens).
+"""End-to-end inversion: hidden state -> Stage A (codes) -> Stage B (tokens).
+
+Model-independent: ``adapter`` is any VictimModel (models/interface.py), e.g.
+ELFAdapter or DiffuSeqAdapter.
 
     from elf_inversion import invert_prompt, AttackConfig
     result = invert_prompt("The small bird flew over the quiet", adapter, observation_layer=3,
@@ -19,11 +22,10 @@ import numpy as np
 from .backbone.knowledge import AttackerKnowledge
 from .backbone.recovery import RecoveryResult, recover
 from .backbone.solver import SolverConfig
-from .models.elf.forward import BackboneForward
 from .tokens.attack import AttackConfig
 from .tokens.search import SearchResult, search as search_tokens
 
-from .observation import SAMPLING_STEPS, Observation, generate, prompt_tokens
+from .observation import Observation, generate, prompt_tokens
 
 
 @dataclass(frozen=True)
@@ -57,7 +59,7 @@ def run_stages(observation, adapter, metadata, solver_config=SolverConfig(), att
         raise ValueError("Stage A supplies projected targets only; encoder inversion is nonunique")
     report = progress or (lambda *args, **kwargs: None)
     report("stage_a_start", f"Stage A: inverting the hidden state after {metadata.observation_layer} block(s)")
-    forward = BackboneForward(adapter, metadata, knowledge)
+    forward = adapter.forward_map(metadata, knowledge)
     recovered = recover(forward.select_rows(observation), forward, solver_config, progress=progress)
     report("stage_a_done", f"Stage A finished: {recovered.method}, converged={recovered.converged} "
            f"({recovered.stop_reason}), residual {recovered.absolute_residual:.6g}, "
@@ -113,6 +115,8 @@ def invert_observation(observation: Observation, adapter, *, solver=SolverConfig
     token IDs (one restart only). ``adapter`` is resized to the observation's prompt length.
     """
     search = search or AttackConfig(mode="projected")
+    if observation.model != adapter.family:
+        raise ValueError(f"A {observation.model} observation cannot be inverted with a {adapter.family} model")
     metadata = observation.metadata
     adapter = adapter.with_prompt_length(metadata.prompt_length)
     recovered, found = run_stages(observation.hidden_state, adapter, metadata, solver, search,
@@ -125,15 +129,16 @@ def invert_observation(observation: Observation, adapter, *, solver=SolverConfig
     return InversionResult(observation, recovered, found, texts, evaluation)
 
 
-def invert_prompt(prompt, adapter, *, observation_layer, noise_seed=100, self_cond_cfg_scale=1.0,
-                  attention_mask=None, time=0.0, sampling_steps=SAMPLING_STEPS, solver=SolverConfig(),
-                  search=None, start_tokens=None, progress=None, knowledge=AttackerKnowledge()) -> InversionResult:
-    """Generate ELF's hidden state for ``prompt`` (text or token IDs), then invert it.
+def invert_prompt(prompt, adapter, *, observation_layer, noise_seed=100, time=0.0, sampling_steps=None,
+                  solver=SolverConfig(), search=None, start_tokens=None, progress=None,
+                  knowledge=AttackerKnowledge(), **options) -> InversionResult:
+    """Generate the model's hidden state for ``prompt`` (text or token IDs), then invert it.
 
     The prompt is only used to create the hidden state and, afterwards, to fill
     ``result.evaluation``; recovery itself sees the hidden state and metadata only.
     ``time`` > 0 observes a later sampler call (see ``generate``); Stage A uses it only if
     ``knowledge.knows_time``, otherwise it recovers the time as one more unknown.
+    ``options`` are the model family's observation options (see ``generate``).
     """
     report = progress or (lambda *args, **kwargs: None)
     tokens = (prompt_tokens(adapter, prompt=prompt) if isinstance(prompt, str)
@@ -141,8 +146,7 @@ def invert_prompt(prompt, adapter, *, observation_layer, noise_seed=100, self_co
     report("observation_start", f"Generating the hidden state after {observation_layer} block(s) "
            f"for {len(tokens)} prompt tokens")
     observation, adapter = generate(adapter, tokens, observation_layer=observation_layer, noise_seed=noise_seed,
-                                    self_cond_cfg_scale=self_cond_cfg_scale, attention_mask=attention_mask,
-                                    time=time, sampling_steps=sampling_steps)
+                                    time=time, sampling_steps=sampling_steps, **options)
     report("observation_done", "Hidden state generated")
     return invert_observation(observation, adapter, solver=solver, search=search, start_tokens=start_tokens,
                               progress=progress, knowledge=knowledge)

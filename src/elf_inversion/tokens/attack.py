@@ -1,4 +1,4 @@
-"""Greedy gradient-shortlisted, exact-loss single-token search using ELFAdapter.
+"""Greedy gradient-shortlisted, exact-loss single-token search on any TokenModel (ELF, DiffuSeq).
 
 One attack handles one prompt. Targets are [1, length, dimension] (or
 [length, dimension]); mode is explicit and used for every loss and gradient.

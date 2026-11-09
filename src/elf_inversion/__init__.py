@@ -1,4 +1,4 @@
-"""Recover ELF prompts from hidden states.
+"""Recover the prompts of diffusion language models (ELF, DiffuSeq) from hidden states.
 
     from elf_inversion import ELFAdapter, AttackConfig, invert_prompt
     adapter = ELFAdapter.from_config(projected=True)
@@ -22,6 +22,7 @@ _EXPORTS = {
     "SolverConfig": "elf_inversion.backbone.solver",
     "AttackConfig": "elf_inversion.tokens.attack",
     "ELFAdapter": "elf_inversion.models.elf.adapter",
+    "DiffuSeqAdapter": "elf_inversion.models.diffuseq.adapter",
 }
 __all__ = sorted(_EXPORTS)
 

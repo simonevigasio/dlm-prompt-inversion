@@ -1,4 +1,7 @@
-"""Pipeline command: invert every prompt of a dataset, ELF hidden state -> Stage A -> Stage B.
+"""Pipeline command: invert every prompt of a dataset, hidden state -> Stage A -> Stage B.
+
+The victim model is the family named by the config's model settings file
+(``family:`` in e.g. configs/model.yaml or configs/diffuseq.yaml; ELF when absent).
 
     python run_pipeline.py --config configs/pipeline/layer_3.yaml \\
         --dataset prompts/example.jsonl --output outputs/pipeline/example
@@ -55,20 +58,19 @@ import yaml
 
 import elf_inversion
 
+from . import models
 from .backbone.solver import SolverConfig
-from .models.elf.adapter import ELFAdapter
-from .observation import SAMPLING_STEPS, ForwardMismatch, prompt_tokens
+from .observation import ForwardMismatch, prompt_tokens
 from .pipeline import InversionResult, invert_prompt
 from .progress import ProgressLogger
 from .runs import (append_result, canonical, digest, file_sha256, json_safe, locked_directory,
                    read_results, write_manifest)
 from .tokens.attack import AttackConfig
 from .backbone.knowledge import AttackerKnowledge
-from .models.elf.setup import BackboneSetup
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SYNTHETIC_KEYS = {"observation_layer", "noise_seed", "self_cond_cfg_scale", "attention_mask", "time",
-                  "sampling_steps"}
+# synthetic_observation keys every family accepts; each family adds its OBSERVATION_OPTIONS.
+SYNTHETIC_KEYS = {"observation_layer", "noise_seed", "time", "sampling_steps"}
 RESULT_KEY = ("example_id", "repetition")
 # Noise seeds tried per (prompt, repetition) before it is skipped for a Stage A forward mismatch.
 NOISE_ATTEMPTS = 3
@@ -79,12 +81,13 @@ FORWARD_MISMATCH = "Stage A forward does not reproduce the native observation"
 class PipelineConfig:
     path: Path
     model: Path
+    family: str  # victim model family, from the model settings file
     solver: SolverConfig
     search: AttackConfig  # includes Stage B's restarts and start seed
     synthetic_observation: dict  # how each dataset prompt's hidden state is generated
     repetitions: int  # runs per prompt, each with seeds derived from (prompt id, repetition)
     attacker_knowledge: AttackerKnowledge
-    backbone: BackboneSetup  # victim denoiser: checkpoint or random weights, bottleneck on/off
+    backbone: object  # the family's BackboneSetup: checkpoint or random weights (ELF: bottleneck on/off)
     resolved: dict  # every setting, with the stage files inlined, for the manifest
     
 
@@ -99,8 +102,11 @@ def load_config(path):
     if type(repetitions) is not int or repetitions < 1:
         raise ValueError(f"{path}: repetitions must be an integer >= 1")
     knowledge = AttackerKnowledge(**(raw.get("attacker_knowledge") or {}))
+    model = (path.parent / raw["model"]).resolve()
+    family_name = models.settings_family(model)
+    family = models.family(family_name)
     # No section: the released checkpoint, as before the feature existed.
-    backbone = BackboneSetup(**(raw.get("backbone") or {}))
+    backbone = family.BackboneSetup(**(raw.get("backbone") or {}))
     # Stage files list only what differs from the SolverConfig/AttackConfig defaults.
     stage_a = yaml.safe_load((path.parent / raw["stage_a"]).read_text()) or {}
     stage_b = yaml.safe_load((path.parent / raw["stage_b"]).read_text()) or {}
@@ -110,27 +116,31 @@ def load_config(path):
         raise ValueError("Stage A recovers projected codes; Stage B must use mode: projected")
     # Prompts come only from the --dataset file, never from the config.
     synthetic = raw["synthetic_observation"]
-    if not isinstance(synthetic, dict) or synthetic.keys() - SYNTHETIC_KEYS or "observation_layer" not in synthetic:
-        raise ValueError(f"synthetic_observation needs observation_layer; allowed keys: {sorted(SYNTHETIC_KEYS)} "
-                         "(prompts come from the --dataset file)")
+    allowed = SYNTHETIC_KEYS | set(family.OBSERVATION_OPTIONS)
+    if not isinstance(synthetic, dict) or synthetic.keys() - allowed or "observation_layer" not in synthetic:
+        raise ValueError(f"synthetic_observation needs observation_layer; allowed keys for {family_name}: "
+                         f"{sorted(allowed)} (prompts come from the --dataset file)")
     # The manifest records every effective value, defaults included, not just the file contents.
     # The backbone setup is part of the resume identity: a changed victim model (weights,
     # bottleneck, init_std, init_seed) never resumes into an existing run directory.
-    return PipelineConfig(path, (path.parent / raw["model"]).resolve(), solver, search, synthetic, repetitions, knowledge,
+    return PipelineConfig(path, model, family_name, solver, search, synthetic, repetitions, knowledge,
                           backbone,
-                          {**raw, "repetitions": repetitions, "stage_a": asdict(solver), "stage_b": asdict(search),
+                          {**raw, "family": family_name, "repetitions": repetitions, "stage_a": asdict(solver), "stage_b": asdict(search),
                            "stage_a_file": raw["stage_a"], "stage_b_file": raw["stage_b"], "attacker_knowledge": asdict(knowledge),
                            "backbone": asdict(backbone)})
 
 
 def generation_options(synthetic):
-    """Keyword arguments of invert_prompt() from a synthetic_observation section."""
-    return {"observation_layer": synthetic["observation_layer"],
+    """Keyword arguments of invert_prompt() from a synthetic_observation section.
+
+    Model-specific keys (already validated by load_config) are passed on as given;
+    their defaults are the model's. sampling_steps None is the model's own schedule.
+    """
+    return {**{key: value for key, value in synthetic.items() if key not in SYNTHETIC_KEYS},
+            "observation_layer": synthetic["observation_layer"],
             "noise_seed": synthetic.get("noise_seed", 100),
-            "self_cond_cfg_scale": synthetic.get("self_cond_cfg_scale", 1.0),
-            "attention_mask": synthetic.get("attention_mask"),
             "time": synthetic.get("time", 0.0),
-            "sampling_steps": synthetic.get("sampling_steps", SAMPLING_STEPS)}
+            "sampling_steps": synthetic.get("sampling_steps")}
 
 
 def inversion_options(config, progress_interval):
@@ -190,7 +200,7 @@ def package_versions():
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
-        description="Invert every prompt of a dataset: ELF hidden state -> Stage A -> Stage B. "
+        description="Invert every prompt of a dataset: hidden state -> Stage A -> Stage B. "
                     "For a single prompt, use elf_inversion.invert_prompt from Python.")
     parser.add_argument("--config", type=Path, required=True, help="Pipeline config, e.g. configs/pipeline/layer_3.yaml")
     parser.add_argument("--dataset", type=Path, required=True,
@@ -221,10 +231,12 @@ def main(argv=None):
 
 def load_adapter(config, report):
     setup = config.backbone
-    weights = "pinned ELF checkpoint" if setup.weights == "checkpoint" else f"random ELF weights (init_seed {setup.init_seed})"
-    report("model_loading_start", f"Loading {weights}, bottleneck {'on' if setup.bottleneck else 'off'} "
-           "(local_files_only from the model settings)", backbone=asdict(setup))
-    adapter = ELFAdapter.from_config(config.model, projected=True, setup=setup)
+    weights = (f"pinned {config.family} checkpoint" if setup.weights == "checkpoint"
+               else f"random {config.family} weights (init_seed {setup.init_seed})")
+    bottleneck = f", bottleneck {'on' if setup.bottleneck else 'off'}" if hasattr(setup, "bottleneck") else ""
+    report("model_loading_start", f"Loading {weights}{bottleneck} "
+           "(local_files_only from the model settings)", family=config.family, backbone=asdict(setup))
+    adapter = models.family(config.family).Adapter.from_config(config.model, setup=setup)
     report("model_loading_done", "Model loaded")
     return adapter
 
@@ -329,7 +341,7 @@ def open_dataset_run(config, dataset_path, output):
 def run_dataset(config, dataset_path, output, report, progress_interval=10.0):
     """Invert every (prompt, repetition) into the locked ``output``; completed ones are skipped on rerun.
 
-    Prompts that cannot be inverted (empty, special tokens, longer than ELF's
+    Prompts that cannot be inverted (empty, special tokens, longer than the model's
     conditioning prefix) are recorded as skipped with their reason.
     """
     examples = read_dataset(dataset_path)

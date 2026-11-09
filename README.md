@@ -1,22 +1,28 @@
 # elf-prompt-inversion
 
-Recover the prompt given to ELF (Embedded Language Flows) from one of its hidden states.
+Recover the prompt given to a continuous diffusion language model from one of its hidden
+states. The attack is model-independent; two victim models are implemented:
+ELF (Embedded Language Flows) and [DiffuSeq](https://github.com/Shark-NLP/DiffuSeq).
 
-1. **[Stage A](src/elf_inversion/backbone/README.md)**: hidden state → bottleneck codes of the prompt.
-2. **[Stage B](src/elf_inversion/tokens/README.md)**: bottleneck codes → prompt tokens.
+1. **[Stage A](src/elf_inversion/backbone/README.md)**: hidden state → codes of the prompt
+   (ELF: bottleneck codes; DiffuSeq: token embeddings).
+2. **[Stage B](src/elf_inversion/tokens/README.md)**: codes → prompt tokens.
 
 ```text
 run_pipeline.py          run an experiment: dataset → Stage A → Stage B → scores
 configs/
-  model.yaml             pinned ELF commit, tokenizer and checkpoints
+  model.yaml             ELF: pinned commit, tokenizer and checkpoints (family: elf)
+  diffuseq.yaml          DiffuSeq: pinned commit and checkpoint (family: diffuseq)
   pipeline/              experiments: model + stage files + observation + attacker knowledge
   stage_a/, stage_b/     solver / search settings (only values that differ from the defaults)
 src/elf_inversion/
-  models/elf/            ELF adapter and forward map; upstream/ is the ELF git submodule
+  models/                victim models; interface.py is what the attack needs from one
+    elf/                 ELF adapter and forward map; upstream/ is the ELF git submodule
+    diffuseq/            DiffuSeq adapter and forward map; upstream/ is the DiffuSeq git submodule
   backbone/              Stage A
   tokens/                Stage B
   pipeline.py            Stage A → Stage B for one prompt
-  observation.py         generate, save and load hidden states
+  observation.py         generate, save and load hidden states (any model)
   cli.py, runs.py        the experiment command and its resumable output folders
   datasets/              prompt datasets (Dolly)
 tests/
@@ -24,12 +30,13 @@ tests/
 
 ## Setup
 
-Python 3.10–3.12. ELF is a git submodule, pinned to the commit in `configs/model.yaml`:
+Python 3.10–3.12. ELF and DiffuSeq are git submodules, pinned to the commits in
+`configs/model.yaml` and `configs/diffuseq.yaml`:
 
 ```bash
 git clone --recursive <this repo>      # or, in an existing clone: git submodule update --init
 python3 -m venv .venv
-.venv/bin/python -m pip install -e '.[test]'           # CPU
+.venv/bin/python -m pip install -e '.[test]'           # CPU (the test extra includes PyTorch for DiffuSeq)
 ```
 
 For an NVIDIA GPU (Linux, CUDA 12), install the CPU build of `torch` first, because the
@@ -40,9 +47,42 @@ CUDA build conflicts with JAX's cuDNN:
 .venv/bin/python -m pip install -e '.[cuda,test]'
 ```
 
-Checkpoints are downloaded from Hugging Face on first use. The denoiser is large and its
-cache defaults to `/tmp/stage-b-hf`: set `denoiser.cache_dir` in `configs/model.yaml` to a
-persistent path.
+Checkpoints are downloaded on first use. ELF's come from Hugging Face; its denoiser is large
+and its cache defaults to `/tmp/stage-b-hf`: set `denoiser.cache_dir` in `configs/model.yaml` to
+a persistent path. DiffuSeq's QQP checkpoint is a zip on Google Drive (370 MB), verified by its
+SHA-256 and cached in `~/.cache/elf-prompt-inversion/diffuseq`.
+
+## Victim models
+
+The pipeline config's `model:` file names the family (`family: elf` or `family: diffuseq`),
+and everything else follows from it: the adapter, the forward map Stage A inverts, the
+sampler that makes observations, and the allowed `backbone:` and `synthetic_observation:` keys.
+
+**DiffuSeq** (`configs/diffuseq.yaml`, QQP paraphrase release: 128-wide token embeddings,
+a 12-layer BERT-base encoder, 128 rows, 2000 diffusion steps) is a sequence-to-sequence model
+and PyTorch upstream. Its own model and sampler make each observation;
+`models/diffuseq/forward.py` ports the forward pass to JAX for the attack, and every
+observation checks the two agree. Differences from ELF:
+
+- The prompt is DiffuSeq's source sentence, laid out as upstream does:
+  `[CLS] prompt [SEP] [SEP]`, then the generated rows. The source rows keep their clean
+  embeddings at every call (upstream's partial noising); `[CLS]`/`[SEP]` are known.
+- No encoder and no self-conditioning. The codes are the model's input rows: the prompt's
+  embeddings and the generated rows (noise at the first call, `x_t` later), each 128 wide
+  against a 768-wide encoder. `input_up_proj` (a tanh MLP) and a LayerNorm make even
+  layer 0 nonlinear, so there is no algebraic solve.
+- `observed_rows: generated` hides the whole source block.
+- Time `k / 2000` is the `k`-th call of upstream's default 2000-step decoder (one step is
+  about 0.2 s on a CPU). Upstream's DDIM decoder (`--step` < 2000) is not supported: it
+  ignores the source. With `knows_time: false` the timestep enters through a sinusoidal
+  embedding, so the loss oscillates in the time and local search rarely finds it.
+- `backbone:` has `weights`, `bottleneck`, `init`, `init_std`, `init_seed`. Without the
+  bottleneck the embeddings are 768 wide and enter the encoder directly (random weights only).
+
+```bash
+python3 run_pipeline.py --config configs/pipeline/diffuseq_layer_3.yaml \
+    --dataset prompts/example.jsonl --output outputs/diffuseq
+```
 
 ## Run an experiment
 
@@ -103,5 +143,5 @@ state on disk and invert it later (see `observation.py`).
 .venv/bin/python -m unittest
 ```
 
-They use a tiny random ELF and need no downloads. Set `ELF_CHECKPOINTS=1` to also check the
-real checkpoints.
+They use a tiny random ELF and a tiny random DiffuSeq and need no downloads. Set
+`ELF_CHECKPOINTS=1` or `DIFFUSEQ_CHECKPOINTS=1` to also check the real checkpoints.

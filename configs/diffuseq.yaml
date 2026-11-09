@@ -1,0 +1,23 @@
+# Pinned DiffuSeq source and checkpoint, shared by both stages.
+family: diffuseq
+# diffuseq_root is relative to this file: the official DiffuSeq source, a git submodule of this
+# repository. Fetch it with `git submodule update --init`; its commit must equal diffuseq_commit.
+diffuseq_root: ../src/elf_inversion/models/diffuseq/upstream
+diffuseq_commit: f78945d79de5783a4329695c0adb1e11adde31bf
+# The released QQP (paraphrase) checkpoint: a zip on Google Drive (README, "Update 28 Nov 2022"),
+# pinned by its SHA-256. It holds training_args.json, the tokenizer and the EMA weights.
+checkpoint:
+  url: https://drive.usercontent.google.com/download?id=1gj9OpGlM9OzbbrCIOfia8Ve6GMDd2Vxa&export=download&confirm=t
+  sha256: 42197fcfe0e36fb6f5c12b336d0913aab8ec5ad67aa7acab7c9d4b90330ccb12
+  directory: "diffuseq_qqp_h128_lr0.0001_t2000_sqrt_lossaware_seed102_test_ori20221113-20:27:29"
+  parameters: ema_0.9999_050000.pt
+  cache_dir: ~/.cache/elf-prompt-inversion/diffuseq
+# The checkpoint names its encoder configuration "bert-base-uncased"; pinned here.
+bert_config:
+  repo: bert-base-uncased
+  revision: 86b5e0934494bd15c9632b12f734a8a67f723594
+# Default prompt length of a loaded adapter; experiments resize it to each prompt's own length.
+prompt_length: 8
+# true: cache only (fails if missing); false: always download; auto: cache first,
+# download pinned files only when missing.
+local_files_only: auto

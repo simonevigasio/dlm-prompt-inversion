@@ -1,0 +1,30 @@
+# Full pipeline on DiffuSeq (QQP release): hidden state after the third complete BERT layer
+# -> Stage A -> Stage B. Paths are relative to this file; the model settings file names the family.
+model: ../diffuseq.yaml
+stage_a: ../stage_a/levenberg_marquardt.yaml
+stage_b: ../stage_b/k100.yaml
+
+# How the hidden state of every --dataset prompt is generated. The prompt is DiffuSeq's source
+# sentence: [CLS] prompt [SEP] [SEP], then generated rows. DiffuSeq has no ELF options
+# (self_cond_cfg_scale, attention_mask). A later call needs time = k / 2000 (upstream's default
+# 2000-step decoder; each step is about 0.2 s on a CPU), e.g. time: 0.5.
+synthetic_observation:
+  observation_layer: 3
+  noise_seed: 100
+
+# What the attacker knows (every flag is optional, see configs/pipeline/layer_3.yaml).
+# observed_rows "generated" hides the whole source block. knows_time False runs, but the time
+# enters through a sinusoidal embedding of the timestep, so local search rarely finds it.
+# attacker_knowledge:
+#   knows_noise_scale: False
+
+# Victim model (optional; default = released checkpoint). bottleneck False: embeddings as wide
+# as the encoder (768) and no input_up_proj; it needs random weights.
+# backbone:
+#   weights: random
+#   bottleneck: False
+#   init: normal
+#   init_std: 0.02
+#   init_seed: 0
+
+repetitions: 5

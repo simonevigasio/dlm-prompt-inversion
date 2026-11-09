@@ -18,11 +18,14 @@ dependencies = [
 [project.optional-dependencies]
 # NVIDIA GPUs: JAX's CUDA 12 plugin with pip-installed CUDA libraries (Linux only).
 cuda = ["jax[cuda12]==0.4.38"]
-# ELF's native data collator, used by the adapter equivalence tests.
+# DiffuSeq: upstream is PyTorch (it loads the weights and runs the sampler that makes observations).
+diffuseq = ["torch==2.3.0"]
+# ELF's native data collator, used by the adapter equivalence tests; PyTorch also runs the DiffuSeq tests.
 test = ["torch==2.3.0", "datasets>=2.19"]
 
 [tool.setuptools]
-packages = ["elf_inversion", "elf_inversion.models", "elf_inversion.models.elf", "elf_inversion.backbone",
+packages = ["elf_inversion", "elf_inversion.models", "elf_inversion.models.elf", "elf_inversion.models.diffuseq",
+            "elf_inversion.backbone",
             "elf_inversion.tokens", "elf_inversion.datasets"]
 
 [tool.setuptools.package-dir]

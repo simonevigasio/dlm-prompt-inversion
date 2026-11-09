@@ -1,3 +1,6 @@
 [submodule "src/elf_inversion/models/elf/upstream"]
 	path = src/elf_inversion/models/elf/upstream
 	url = https://github.com/lillian039/ELF.git
+[submodule "src/elf_inversion/models/diffuseq/upstream"]
+	path = src/elf_inversion/models/diffuseq/upstream
+	url = https://github.com/Shark-NLP/DiffuSeq.git

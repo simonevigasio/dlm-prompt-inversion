@@ -23,6 +23,9 @@ import jax.numpy as jnp
 import numpy as np
 import yaml
 
+from elf_inversion.backbone.knowledge import AttackerKnowledge
+from elf_inversion.models.hub import from_hub as _from_hub
+from elf_inversion.models.elf.forward import BackboneForward, ForwardMetadata
 from elf_inversion.models.elf.setup import BackboneSetup
 
 Mode = Literal["encoder", "projected"]
@@ -122,21 +125,6 @@ def _native_config(native, config_path: Path):
     return config
 
 
-def _from_hub(load, offline):
-    """``load(local_files_only)`` for True/False; "auto" reads the cache and downloads only on a miss.
-
-    Downloads are still pinned to the configured revisions.
-    """
-    if offline not in (True, False, "auto"):
-        raise ValueError('local_files_only must be true, false or "auto"')
-    if offline != "auto":
-        return load(offline)
-    try:
-        return load(True)
-    except OSError:  # huggingface_hub's LocalEntryNotFoundError and transformers' missing files
-        return load(False)
-
-
 def _load_denoiser_params(native, config, spec, offline):
     """EMA parameters of the released denoiser, checked against the source config.
 
@@ -227,6 +215,12 @@ class PromptBatch:
 
 
 class ELFAdapter:
+    """ELF as a VictimModel (models/interface.py) and a Stage B TokenModel."""
+
+    family = "elf"
+    # Steps of the uniform schedule a later-pass observation is sampled on (ELF's sampling configs use 64).
+    sampling_steps = 64
+
     def __init__(self, *, native, config, tokenizer, encoder, encoder_params,
                  prompt_length, filler_token_ids, model=None, model_params=None,
                  provenance=None):
@@ -324,6 +318,19 @@ class ELFAdapter:
         adapter = copy.copy(self)
         adapter.prompt_length = int(prompt_length)
         return adapter
+
+    def metadata(self, prompt_length, observation_layer, *, time=0.0, forward_mode="first_sampling_pass",
+                 self_cond_cfg_scale=1.0, attention_mask=None) -> ForwardMetadata:
+        return ForwardMetadata(prompt_length, observation_layer, time=time, self_cond_cfg_scale=self_cond_cfg_scale,
+                               attention_mask=None if attention_mask is None else tuple(attention_mask),
+                               forward_mode=forward_mode)
+
+    def forward_map(self, metadata: ForwardMetadata, knowledge: AttackerKnowledge = AttackerKnowledge()):
+        return BackboneForward(self, metadata, knowledge)
+
+    def observe(self, tokens, metadata: ForwardMetadata, *, noise_seed, sampling_steps):
+        from .observe import observe  # imports elf_inversion.observation, which is model-independent
+        return observe(self, tokens, metadata, noise_seed=noise_seed, sampling_steps=sampling_steps)
 
     @property
     def embedding_table(self):

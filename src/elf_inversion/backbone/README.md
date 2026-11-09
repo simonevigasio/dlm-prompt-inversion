@@ -1,15 +1,21 @@
 # Stage A: backbone inversion
 
-Given one ELF hidden state, find the bottleneck codes that produced it. The prompt's code
+Given one hidden state, find the codes that produced it. The solver and `recover()` are
+model-independent: they only use a `ForwardMap` (`interface.py`), which each model builds
+with `adapter.forward_map(metadata, knowledge)`. The sections below describe ELF; DiffuSeq's
+map is documented in `models/diffuseq/forward.py`. The prompt's code
 `zeta_p` is the target Stage B turns into tokens. A small residual means the codes
 reproduce the observation; it does not prove they are the only ones that do.
 
 ```text
 backbone/
   knowledge.py   AttackerKnowledge: what the attacker is assumed to know
+  interface.py   ForwardMap: what Stage A needs from a model's forward map
+  basis.py       row_basis: coordinates of the reachable codes
   solver.py      Levenberg–Marquardt with matrix-free conjugate gradient (model-independent)
   recovery.py    recover(): random restarts, best result, Stage B target
-models/elf/forward.py   BackboneForward: the ELF forward map that Stage A inverts
+models/elf/forward.py        BackboneForward: the ELF forward map that Stage A inverts
+models/diffuseq/forward.py   BackboneForward: the DiffuSeq forward map (JAX port of upstream)
 ```
 
 ```python
@@ -68,4 +74,5 @@ Settings: `SolverConfig` in `solver.py`; `configs/stage_a/` lists only changed v
 ```bash
 .venv/bin/python -m unittest discover -s tests/backbone -t .
 .venv/bin/python -m unittest discover -s tests/models/elf -t .
+.venv/bin/python -m unittest discover -s tests/models/diffuseq -t .
 ```

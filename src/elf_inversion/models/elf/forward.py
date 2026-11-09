@@ -6,6 +6,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from ...backbone.basis import row_basis
 from ...backbone.knowledge import AttackerKnowledge
 
 
@@ -59,15 +60,6 @@ def validate_metadata(adapter, metadata: ForwardMetadata):
         mask = np.asarray(metadata.attention_mask)
         if mask.shape != (model.max_length,) or not np.isin(mask, [0, 1]).all():
             raise ValueError("attention_mask must contain one binary entry per sequence position")
-
-
-def row_basis(matrix):
-    """Orthonormal basis of the numerically reachable row space (float32 rank)."""
-    a = np.asarray(matrix, dtype=np.float64)
-    _, singular, vh = np.linalg.svd(a, full_matrices=False)
-    cutoff = np.finfo(np.float32).eps * max(a.shape) * (singular[0] if len(singular) else 0)
-    rank = int(np.count_nonzero(singular > cutoff))
-    return jnp.asarray(vh[:rank], dtype=jnp.float32), singular, cutoff
 
 
 class BackboneForward:

@@ -1,6 +1,7 @@
 # Stage B: token search
 
-Find prompt tokens whose ELF code matches a target: usually Stage A's `zeta_p`.
+Find prompt tokens whose code matches a target: usually Stage A's prompt code. The search
+only uses a `TokenModel` (`interface.py`); ELF and DiffuSeq adapters both are one.
 
 ```text
 tokens/
@@ -22,6 +23,9 @@ found.tokens, found.final_loss, found.selected_restart
 - **projected** (used by the pipeline): the 128-dim bottleneck code,
   `C (Wz + Ws) W1 + c`, the same quantity Stage A recovers.
 - **encoder**: the T5 encoder output `C` itself, with 512 features per token.
+
+For DiffuSeq both modes are the same: the prompt's token embeddings (128 features), which are
+the prompt rows of the model input. Each prompt token's code depends on that token alone.
 
 The prompt is padded with one EOS and EOS padding; the encoder mask keeps the padding
 from affecting the prompt's code.
