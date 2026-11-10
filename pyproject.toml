@@ -22,6 +22,8 @@ cuda = ["jax[cuda12]==0.4.38"]
 diffuseq = ["torch==2.3.0"]
 # ELF's native data collator, used by the adapter equivalence tests; PyTorch also runs the DiffuSeq tests.
 test = ["torch==2.3.0", "datasets>=2.19"]
+# Figures of scripts/plot_elf_grid.py. matplotlib 3.10 would pull in numpy 2.
+plot = ["matplotlib>=3.8,<3.10"]
 
 [tool.setuptools]
 packages = ["elf_inversion", "elf_inversion.models", "elf_inversion.models.elf", "elf_inversion.models.diffuseq",

@@ -1,0 +1,19 @@
+# Written by scripts/run_elf_grid.py; edit the grid there, not this file.
+model: ../../models/elf.yaml
+stage_a: ../../stage_a/levenberg_marquardt.yaml
+stage_b: ../../stage_b/k100.yaml
+synthetic_observation:
+  observation_layer: 1
+  noise_seed: 100
+  step: 32
+attacker_knowledge:
+  observed_rows: generated
+  knows_time: false
+  knows_noise_scale: true
+backbone:
+  weights: random
+  bottleneck: true
+  init: normal
+  init_std: 0.02
+  init_seed: 0
+repetitions: 1
