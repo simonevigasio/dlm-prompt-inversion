@@ -21,8 +21,9 @@ import numpy as np
 
 from .backbone.knowledge import AttackerKnowledge
 from .backbone.recovery import RecoveryResult, recover
-from .backbone.solver import SolverConfig
+from .backbone.solver import SolverConfig, relative_residual
 from .tokens.attack import AttackConfig
+from .tokens.interface import PROMPT_CODE
 from .tokens.search import SearchResult, search as search_tokens
 
 from .observation import Observation, generate, prompt_tokens
@@ -54,9 +55,9 @@ def run_stages(observation, adapter, metadata, solver_config=SolverConfig(), att
     nonfinite. ``progress(event, message, **fields)`` receives both stages'
     status events; Stage B events carry their ``restart`` index.
     """
-    attack_config = attack_config or AttackConfig(mode="projected")
-    if attack_config.mode != "projected":
-        raise ValueError("Stage A supplies projected targets only; encoder inversion is nonunique")
+    attack_config = attack_config or AttackConfig()
+    if attack_config.representation != PROMPT_CODE:
+        raise ValueError(f"Stage A recovers the prompt code: Stage B must use representation {PROMPT_CODE!r}")
     report = progress or (lambda *args, **kwargs: None)
     report("stage_a_start", f"Stage A: inverting the hidden state after {metadata.observation_layer} block(s)")
     forward = adapter.forward_map(metadata, knowledge)
@@ -76,13 +77,28 @@ def run_stages(observation, adapter, metadata, solver_config=SolverConfig(), att
     return recovered, found
 
 
-def evaluate(recovered, found: SearchResult | None, truth, tokenizer, generator, true_time):
+def code_errors(name, recovered_code, true_code):
+    """Absolute and relative L2 error of one recovered code.
+
+    The relative error, ||recovered - true|| / ||true||, does not grow with the prompt
+    length or the code width, so it can be compared across prompts and models.
+    """
+    true_code = np.asarray(true_code)
+    absolute = float(np.linalg.norm(np.asarray(recovered_code) - true_code))
+    return {f"{name}_error": absolute,
+            f"{name}_relative_error": relative_residual(absolute, float(np.linalg.norm(true_code)))}
+
+
+def evaluate(recovered, found: SearchResult | None, truth, tokenizer, generator, true_time, knows_time=True):
     """Score the recovery against the generator's truth (never used during recovery).
 
     Top-level token scores are for the selected restart; ``stage_b_restarts`` scores every restart.
     ``true_time`` is the declared sampler time (public metadata, not part of ``truth``).
+    ``recovered_time`` and ``time_error`` exist only when Stage A had to recover the time.
     """
     tokens = np.asarray(truth["tokens"])
+    time_scores = {} if knows_time else {"recovered_time": recovered.recovered_time,
+                                         "time_error": abs(recovered.recovered_time - true_time)}
     chosen = None if found is None else found.selected
     per_restart = [{"restart": i, "token_accuracy": float(np.mean(attempt.tokens == tokens)),
                     "exact_tokens": bool(np.array_equal(attempt.tokens, tokens))}
@@ -91,11 +107,10 @@ def evaluate(recovered, found: SearchResult | None, truth, tokenizer, generator,
         "generator": generator,
         "true_text": tokenizer.decode(tokens),
         "true_tokens": tokens,
-        "prompt_code_error": float(np.linalg.norm(np.asarray(recovered.prompt_code) - truth["prompt_code"])),
-        "noise_code_error": float(np.linalg.norm(np.asarray(recovered.noise_code) - truth["noise_code"])),
-        "recovered_time": recovered.recovered_time,
+        **code_errors("prompt_code", recovered.prompt_code, truth["prompt_code"]),
+        **code_errors("noise_code", recovered.noise_code, truth["noise_code"]),
         "true_time": true_time,
-        "time_error": abs(recovered.recovered_time - true_time),
+        **time_scores,
         "stage_b_exact_tokens": bool(chosen is not None and np.array_equal(chosen.tokens, tokens)),
         "stage_b_token_accuracy": float(np.mean(chosen.tokens == tokens)) if chosen is not None else 0.0,
         "stage_b_restarts": per_restart,
@@ -110,11 +125,11 @@ def invert_observation(observation: Observation, adapter, *, solver=SolverConfig
                        start_tokens=None, progress=None, knowledge=AttackerKnowledge()) -> InversionResult:
     """Recover the prompt of one hidden state.
 
-    ``search`` defaults to ``AttackConfig(mode="projected")``; its ``restarts`` and
+    ``search`` defaults to ``AttackConfig()``; its ``restarts`` and
     ``seed`` set Stage B's random starts. ``start_tokens`` replaces them with explicit
     token IDs (one restart only). ``adapter`` is resized to the observation's prompt length.
     """
-    search = search or AttackConfig(mode="projected")
+    search = search or AttackConfig()
     if observation.model != adapter.family:
         raise ValueError(f"A {observation.model} observation cannot be inverted with a {adapter.family} model")
     metadata = observation.metadata
@@ -124,20 +139,20 @@ def invert_observation(observation: Observation, adapter, *, solver=SolverConfig
     evaluation = None
     if observation.truth is not None:
         evaluation = evaluate(recovered, found, observation.truth, adapter.tokenizer, observation.generator,
-                              metadata.time)
+                              metadata.time, knowledge.knows_time)
     texts = () if found is None else tuple(adapter.tokenizer.decode(r.tokens) for r in found.restarts)
     return InversionResult(observation, recovered, found, texts, evaluation)
 
 
-def invert_prompt(prompt, adapter, *, observation_layer, noise_seed=100, time=0.0, sampling_steps=None,
+def invert_prompt(prompt, adapter, *, observation_layer, noise_seed=100, step=0, sampling_steps=None,
                   solver=SolverConfig(), search=None, start_tokens=None, progress=None,
                   knowledge=AttackerKnowledge(), **options) -> InversionResult:
     """Generate the model's hidden state for ``prompt`` (text or token IDs), then invert it.
 
     The prompt is only used to create the hidden state and, afterwards, to fill
     ``result.evaluation``; recovery itself sees the hidden state and metadata only.
-    ``time`` > 0 observes a later sampler call (see ``generate``); Stage A uses it only if
-    ``knowledge.knows_time``, otherwise it recovers the time as one more unknown.
+    ``step`` > 0 observes a later sampler call (see ``generate``). Stage A uses the time of
+    that call only if ``knowledge.knows_time``, otherwise it recovers it as one more unknown.
     ``options`` are the model family's observation options (see ``generate``).
     """
     report = progress or (lambda *args, **kwargs: None)
@@ -146,7 +161,7 @@ def invert_prompt(prompt, adapter, *, observation_layer, noise_seed=100, time=0.
     report("observation_start", f"Generating the hidden state after {observation_layer} block(s) "
            f"for {len(tokens)} prompt tokens")
     observation, adapter = generate(adapter, tokens, observation_layer=observation_layer, noise_seed=noise_seed,
-                                    time=time, sampling_steps=sampling_steps, **options)
+                                    step=step, sampling_steps=sampling_steps, **options)
     report("observation_done", "Hidden state generated")
     return invert_observation(observation, adapter, solver=solver, search=search, start_tokens=start_tokens,
                               progress=progress, knowledge=knowledge)

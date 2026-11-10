@@ -14,7 +14,8 @@ from functools import partial
 
 import numpy as np
 
-from ...observation import SyntheticExample, schedule_steps
+from ...observation import SyntheticExample
+from ..schedule import time_step
 from .forward import BackboneForward, ForwardMetadata
 
 
@@ -22,7 +23,9 @@ def observe(adapter, tokens, metadata: ForwardMetadata, *, noise_seed, sampling_
     """Run upstream's sampler up to the observed call and capture its hidden state.
 
     A "sampling_pass" at time t = k / sampling_steps first takes upstream's k sampler steps.
-    Returned codes (the prompt and generated rows of the model input) are for scoring only.
+    The observation holds the prompt rows, then the generated rows; the [CLS] and [SEP] rows of
+    the source block are dropped. Returned codes (the prompt and generated rows of the model
+    input) are for scoring only.
     """
     import torch
 
@@ -33,7 +36,7 @@ def observe(adapter, tokens, metadata: ForwardMetadata, *, noise_seed, sampling_
     if sampling_steps != steps:
         raise ValueError(f"DiffuSeq observations use upstream's default decoder: sampling_steps must be "
                          f"the {steps} diffusion steps")
-    k = 0 if metadata.forward_mode == "first_sampling_pass" else schedule_steps(metadata.time, sampling_steps)[1]
+    k = 0 if metadata.forward_mode == "first_sampling_pass" else time_step(metadata.time, sampling_steps)[1]
     indices = list(range(steps))[::-1]
     model, diffusion = adapter.torch_model, adapter.diffusion
     n, layer = metadata.prompt_length, metadata.observation_layer
@@ -71,4 +74,4 @@ def observe(adapter, tokens, metadata: ForwardMetadata, *, noise_seed, sampling_
                 hook.remove()
     x, h = captured["x"].numpy(), captured["h"].numpy()
     assert h.shape == (1, adapter.seq_len, adapter.hidden_size)
-    return SyntheticExample(forward.select_rows(h), x[:, 1:n + 1], x[:, n + 3:], tokens)
+    return SyntheticExample(np.asarray(forward.text_rows(h)), x[:, 1:n + 1], x[:, n + 3:], tokens)

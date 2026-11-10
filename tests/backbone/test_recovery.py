@@ -28,7 +28,7 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(first.selected_restart, int(np.argmin(values)))
         self.assertEqual(first.initialization_seed, 10 + first.selected_restart)
 
-    def test_rank_deficiency_disables_unique_algebraic_claim(self):
+    def test_rank_deficiency_disables_the_closed_form_solution(self):
         adapter = copy.copy(self.adapter)
         params = flax.core.unfreeze(adapter.model_params)
         params["text_proj"]["proj2"]["kernel"] = jnp.zeros_like(params["text_proj"]["proj2"]["kernel"])
@@ -36,7 +36,7 @@ class RecoveryTests(unittest.TestCase):
         metadata = ForwardMetadata(1, 0)
         truth = observe(adapter, [4], metadata)
         f = BackboneForward(adapter, metadata)
-        self.assertIsNone(f.algebraic(truth.observation))
+        self.assertIsNone(f.closed_form(truth.observation))
         result = recover(truth.observation, BackboneForward(adapter, metadata), SolverConfig(restarts=1))
         self.assertTrue(result.converged)
         self.assertEqual(result.method, "levenberg_marquardt")
@@ -48,7 +48,7 @@ class RecoveryTests(unittest.TestCase):
         changed = truth.observation.at[:, 0].add(1)
         result = recover(changed, BackboneForward(self.adapter, metadata))
         self.assertFalse(result.converged)
-        self.assertEqual(result.stop_reason, "inconsistent_layer_zero_observation")
+        self.assertEqual(result.stop_reason, "inconsistent_closed_form")
         with self.assertRaises(ValueError):
             recover(truth.observation[:, :-1], BackboneForward(self.adapter, metadata))
 

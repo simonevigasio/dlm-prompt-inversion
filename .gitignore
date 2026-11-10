@@ -24,7 +24,7 @@ checkpoint_*/
 *.parquet
 *.npy
 *.npz
-.
+
 # vscode debugging
 .vscode/
 

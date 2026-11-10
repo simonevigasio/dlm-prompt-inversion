@@ -1,5 +1,5 @@
 """ELF as a model family of the attack (see elf_inversion.models)."""
-from .adapter import ELFAdapter as Adapter
+from .adapter import ELFAdapter as Adapter, load_tokenizer
 from .forward import ForwardMetadata
 from .setup import BackboneSetup
 

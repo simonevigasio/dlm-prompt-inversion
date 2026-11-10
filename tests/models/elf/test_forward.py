@@ -11,6 +11,9 @@ from elf_inversion.models.elf.testing import tiny_native_adapter
 from elf_inversion.observation import generate, observe
 from elf_inversion.backbone.interface import ForwardMap
 from elf_inversion.backbone.knowledge import AttackerKnowledge
+from elf_inversion.backbone.solver import SolverConfig
+from elf_inversion.pipeline import invert_prompt
+from elf_inversion.tokens.attack import AttackConfig
 
 
 class ForwardTests(unittest.TestCase):
@@ -27,7 +30,7 @@ class ForwardTests(unittest.TestCase):
                     truth = observe(self.adapter, [4], metadata)
                     coordinates = f.coordinates(truth.prompt_code, truth.noise_code)
                     np.testing.assert_allclose(jax.jit(f)(coordinates), truth.observation, atol=3e-5, rtol=3e-5)
-                    target = self.adapter.encode_token_ids(self.adapter.prepare_token_ids([4]), "projected")
+                    target = self.adapter.encode_token_ids(self.adapter.prepare_token_ids([4]), "prompt_code")
                     np.testing.assert_allclose(f.codes(coordinates)[0], target, atol=2e-6)
                     self.assertGreater(float(jnp.linalg.norm(f.bias)), 0)
 
@@ -54,7 +57,7 @@ class ForwardTests(unittest.TestCase):
                     coordinates = f.coordinates(truth.prompt_code, truth.noise_code)
                     np.testing.assert_allclose(f.codes(coordinates)[1], truth.noise_code, atol=2e-6)
                     np.testing.assert_allclose(jax.jit(f)(coordinates), truth.observation, atol=3e-5, rtol=3e-5)
-                    target = self.adapter.encode_token_ids(self.adapter.prepare_token_ids([4]), "projected")
+                    target = self.adapter.encode_token_ids(self.adapter.prepare_token_ids([4]), "prompt_code")
                     np.testing.assert_allclose(f.codes(coordinates)[0], target, atol=2e-6)
 
     def test_later_sampling_pass_differs_from_first_pass(self):
@@ -67,16 +70,18 @@ class ForwardTests(unittest.TestCase):
         self.assertEqual(f.noise_map.shape[0], 2 * self.adapter.model.text_encoder_dim)
 
     def test_generate_later_sampling_pass(self):
-        observation, _ = generate(self.adapter, [4], observation_layer=1, time=0.75, sampling_steps=4)
+        # Call 3 of a 4-step schedule: ELF's time is 3/4.
+        observation, _ = generate(self.adapter, [4], observation_layer=1, step=3, sampling_steps=4)
         self.assertEqual(observation.metadata.forward_mode, "sampling_pass")
         self.assertEqual(observation.metadata.time, 0.75)
-        self.assertEqual(observation.generator["sampling_steps"], 4)
+        self.assertEqual((observation.generator["step"], observation.generator["sampling_steps"]), (3, 4))
         first, _ = generate(self.adapter, [4], observation_layer=1)
         self.assertEqual(first.metadata.forward_mode, "first_sampling_pass")
-        self.assertNotIn("sampling_steps", first.generator)
-        for time in (0.3, 1.0):  # off the 4-step grid; the final time is never a call
-            with self.subTest(time=time), self.assertRaises(ValueError):
-                generate(self.adapter, [4], observation_layer=1, time=time, sampling_steps=4)
+        self.assertEqual((first.metadata.time, first.generator["step"]), (0.0, 0))
+        self.assertEqual(first.generator["sampling_steps"], self.adapter.sampling_steps)  # the model's own
+        for step in (4, -1, 1.5):  # a 4-step sampler has calls 0..3
+            with self.subTest(step=step), self.assertRaises(ValueError):
+                generate(self.adapter, [4], observation_layer=1, step=step, sampling_steps=4)
 
     def test_jvp_vjp_adjoint_and_finite_difference(self):
         f = BackboneForward(self.adapter, ForwardMetadata(1, 1))
@@ -89,12 +94,12 @@ class ForwardTests(unittest.TestCase):
         finite_difference = (f(x + 1e-3 * v) - f(x - 1e-3 * v)) / 2e-3
         np.testing.assert_allclose(jv, finite_difference, atol=2e-3, rtol=2e-3)
 
-    def test_algebraic_code_recovery(self):
+    def test_closed_form_code_recovery(self):
         for m in (ForwardMetadata(1, 0), ForwardMetadata(1, 0, time=0.5, forward_mode="sampling_pass")):
             with self.subTest(forward_mode=m.forward_mode):
                 f = BackboneForward(self.adapter, m)
                 truth = observe(self.adapter, [4], m, sampling_steps=4)
-                recovered = f.algebraic(truth.observation)
+                recovered = f.closed_form(truth.observation)
                 self.assertIsNotNone(recovered)
                 p, g = f.codes(recovered)
                 np.testing.assert_allclose(p, truth.prompt_code, atol=3e-6)
@@ -128,22 +133,28 @@ class ForwardTests(unittest.TestCase):
         raw_noise = jax.random.normal(gk, (1, 3, 8)) * adapter.config.denoiser_noise_scale
         np.testing.assert_allclose(p, raw_prompt @ f.prompt_map + f.bias, atol=2e-6)
         np.testing.assert_allclose(g, raw_noise @ f.noise_map + f.bias, atol=2e-6)
-    
-    def test_noise_std_is_used_only_when_noise_scale_is_unknown(self):
+
+    def test_noise_scale_guess_is_used_only_when_noise_scale_is_unknown(self):
         true_scale = self.adapter.config.denoiser_noise_scale
+
+        def unknown(guess):
+            return AttackerKnowledge(knows_noise_scale=False, noise_scale_guess=guess)
+
         for m in (ForwardMetadata(1), ForwardMetadata(1, time=0.5, forward_mode="sampling_pass")):
             with self.subTest(forward_mode=m.forward_mode):
                 f_known = BackboneForward(self.adapter, m)
-                f_unknown = BackboneForward(self.adapter, m, AttackerKnowledge(knows_noise_scale=False))
-                # Known scale: the noise_std argument is ignored.
-                np.testing.assert_allclose(f_known.initialize(10, noise_std=5.0), f_known.initialize(10))
+                # Known scale: the guess is ignored.
+                ignored = BackboneForward(self.adapter, m, AttackerKnowledge(noise_scale_guess=5.0))
+                np.testing.assert_allclose(ignored.initialize(10), f_known.initialize(10))
                 # Unknown scale guessed right: same start as the known map.
-                np.testing.assert_allclose(f_unknown.initialize(10, noise_std=true_scale), f_known.initialize(10))
+                right = BackboneForward(self.adapter, m, unknown(true_scale))
+                np.testing.assert_allclose(right.initialize(10), f_known.initialize(10))
                 # Unknown scale guessed wrong: different noise, same prompt.
+                wrong = BackboneForward(self.adapter, m, unknown(5.0))
                 p_known, g_known = f_known.codes(f_known.initialize(10))
-                p_unknown, g_unknown = f_unknown.codes(f_unknown.initialize(10, noise_std=5.0))
-                np.testing.assert_allclose(p_unknown, p_known)
-                self.assertFalse(np.allclose(g_unknown, g_known))
+                p_wrong, g_wrong = wrong.codes(wrong.initialize(10))
+                np.testing.assert_allclose(p_wrong, p_known)
+                self.assertFalse(np.allclose(g_wrong, g_known))
 
     def test_the_cut_using_only_generated_rows(self):
         # "generated" hides the prompt rows: the forward map still computes them
@@ -166,9 +177,9 @@ class ForwardTests(unittest.TestCase):
                 np.testing.assert_allclose(f_gen.select_rows(full), full[:, n:])
                 np.testing.assert_allclose(f_all.select_rows(full), full)
 
-                # No algebraic shortcut without the prompt rows (at layer 0 they are
+                # No closed-form shortcut without the prompt rows (at layer 0 they are
                 # the only place the prompt code appears).
-                self.assertIsNone(f_gen.algebraic(f_gen.select_rows(full)))
+                self.assertIsNone(f_gen.closed_form(f_gen.select_rows(full)))
 
     def test_unknown_time_is_the_last_coordinate(self):
         # Layer 1: at layer 0 the time rows are cut before any attention, so time has no effect.
@@ -201,6 +212,46 @@ class ForwardTests(unittest.TestCase):
         self.assertNotEqual(t0, t1)
         for t in (t0, t1):
             self.assertTrue(0.0 <= t < 1.0)
+
+
+class NoBottleneckTests(unittest.TestCase):
+    """ELF with a square text projection (BackboneSetup(bottleneck=False)): the code runs end to end."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.adapter = tiny_native_adapter(bottleneck=False)
+        cls.width = cls.adapter.model.text_encoder_dim
+
+    def test_codes_are_as_wide_as_the_encoder(self):
+        self.assertEqual(self.adapter.config.bottleneck_dim, self.width)
+        self.assertEqual(self.adapter.target_dimension("prompt_code"), self.width)
+        f = BackboneForward(self.adapter, ForwardMetadata(1, 1))
+        # Nothing is compressed: the prompt codes fill the whole width.
+        self.assertEqual(f.prompt_rank, self.width)
+        self.assertEqual(f.codes(f.initialize(0))[0].shape, (1, 1, self.width))
+
+    def test_native_forward_equivalence(self):
+        for layer in (0, 1, 2):
+            for metadata, steps in ((ForwardMetadata(1, layer), None),
+                                    (ForwardMetadata(1, layer, time=0.5, forward_mode="sampling_pass"), 4)):
+                with self.subTest(layer=layer, forward_mode=metadata.forward_mode):
+                    f = BackboneForward(self.adapter, metadata)
+                    truth = observe(self.adapter, [4], metadata, sampling_steps=steps)
+                    coordinates = f.coordinates(truth.prompt_code, truth.noise_code)
+                    np.testing.assert_allclose(jax.jit(f)(coordinates), truth.observation, atol=3e-5, rtol=3e-5)
+                    target = self.adapter.encode_token_ids(self.adapter.prepare_token_ids([4]), "prompt_code")
+                    np.testing.assert_allclose(truth.prompt_code, target, atol=2e-6)
+
+    def test_pipeline_runs(self):
+        for layer in (0, 1):
+            with self.subTest(layer=layer):
+                result = invert_prompt([4], self.adapter, observation_layer=layer,
+                                       solver=SolverConfig(restarts=1, max_iterations=60, residual_atol=1e-4),
+                                       search=AttackConfig(k=9, max_iterations=3), start_tokens=[5])
+                self.assertEqual(result.stage_a.method, "closed_form" if layer == 0 else "levenberg_marquardt")
+                self.assertTrue(np.isfinite(result.stage_a.absolute_residual))
+                self.assertEqual(result.stage_a.stage_b_target.shape, (1, 1, self.width))
+                self.assertEqual(len(result.tokens), 1)
 
 
 if __name__ == "__main__":

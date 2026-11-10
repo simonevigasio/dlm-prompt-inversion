@@ -1,5 +1,5 @@
 """DiffuSeq as a model family of the attack (see elf_inversion.models)."""
-from .adapter import DiffuSeqAdapter as Adapter
+from .adapter import DiffuSeqAdapter as Adapter, load_tokenizer
 from .forward import ForwardMetadata
 from .setup import BackboneSetup
 

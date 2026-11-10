@@ -50,7 +50,7 @@ def append_result(path, row):
         os.fsync(handle.fileno())
 
 
-def read_results(path, *, repair_tail=False, key="trial_id"):
+def read_results(path, key, *, repair_tail=False):
     """Recover only an incomplete trailing write, never silently skip a complete row.
 
     ``key`` names the field, or a tuple of fields, that identifies a completed unit of

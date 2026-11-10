@@ -4,7 +4,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from ...observation import SyntheticExample, schedule_steps
+from ...observation import SyntheticExample
+from ..schedule import time_step
 from .forward import BackboneForward, ForwardMetadata
 
 
@@ -34,7 +35,7 @@ def observe(adapter, tokens, metadata: ForwardMetadata, *, noise_seed, sampling_
     z = sampling.restore_cond(noise, c, batch.cond_seq_mask)
     x_pred = None
     if metadata.forward_mode == "sampling_pass":
-        steps, k = schedule_steps(metadata.time, sampling_steps)
+        steps, k = time_step(metadata.time, sampling_steps)
         x_pred = sampling.restore_cond(jnp.zeros_like(z), c, batch.cond_seq_mask)
         step_apply = _apply_with_mask(adapter, metadata.attention_mask)
         for i in range(k):

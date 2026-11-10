@@ -14,20 +14,21 @@ tokens/
 from elf_inversion.tokens.attack import AttackConfig
 from elf_inversion.tokens.search import search
 
-found = search(target, adapter, AttackConfig(mode="projected", k=100, restarts=5))
+found = search(target, adapter, AttackConfig(k=100, restarts=5))
 found.tokens, found.final_loss, found.selected_restart
 ```
 
 ## Target
 
-- **projected** (used by the pipeline): the 128-dim bottleneck code,
-  `C (Wz + Ws) W1 + c`, the same quantity Stage A recovers.
-- **encoder**: the T5 encoder output `C` itself, with 512 features per token.
+The target is one **representation** of the prompt, named by `AttackConfig.representation`:
 
-For DiffuSeq both modes are the same: the prompt's token embeddings (128 features), which are
-the prompt rows of the model input. Each prompt token's code depends on that token alone.
+- **`prompt_code`** (the default, and what the pipeline uses): the codes Stage A recovers.
+  Every model has it. ELF: the 128-dim bottleneck code `C (Wz + Ws) W1 + c`. DiffuSeq: the
+  prompt's token embeddings (128 features), where each token's code depends on that token alone.
+- A model may offer more under its own names (`TokenModel.representations`). ELF offers
+  **`encoder_state`**: the T5 encoder output `C` itself, with 512 features per token.
 
-The prompt is padded with one EOS and EOS padding; the encoder mask keeps the padding
+For ELF the prompt is padded with one EOS and EOS padding; the encoder mask keeps the padding
 from affecting the prompt's code.
 
 ## Search
@@ -41,8 +42,9 @@ The loss is the mean squared error between the tokens' code and the target. Each
 
 The search also stops at `stopping_loss_tolerance`, `max_iterations` or
 `max_candidate_evaluations` (keep it ≥ `prompt_length × k × max_iterations`). With
-restarts, each starts from random tokens (seed `seed + restart`); by default the first
-restart that reaches the tolerance ends the search.
+restarts, each starts from random tokens (seed `seed + restart`) and the lowest final loss
+wins. By default every restart runs; with `stop_restarts_at_tolerance: true` (set in
+`configs/stage_b/k100.yaml`) the first restart that reaches the tolerance ends the search.
 
 Settings: `AttackConfig` in `attack.py`; `configs/stage_b/` lists only changed values.
 
@@ -52,4 +54,4 @@ Settings: `AttackConfig` in `attack.py`; `configs/stage_b/` lists only changed v
 .venv/bin/python -m unittest discover -s tests/tokens -t .
 ```
 
-They use a tiny fake model and need neither ELF nor checkpoints.
+They use the tiny fake model in `tokens/testing.py` and need no victim model or checkpoint.

@@ -8,7 +8,7 @@ forward.py ports the forward pass to JAX for the attack. A ``BackboneSetup`` can
 the released weights with random ones, with or without the bottleneck.
 
 DiffuSeq has no encoder: Stage A recovers the prompt's token embeddings E[prompt]
-directly, so Stage B's two target modes are the same, the embedding rows.
+directly, so Stage B has one target representation, the prompt code: the embedding rows.
 """
 from __future__ import annotations
 
@@ -24,7 +24,6 @@ import subprocess
 import sys
 import urllib.request
 import zipfile
-from typing import Literal
 
 import jax
 import jax.numpy as jnp
@@ -32,11 +31,12 @@ import numpy as np
 import yaml
 
 from ...backbone.knowledge import AttackerKnowledge
+from ...tokens.interface import PROMPT_CODE
 from ..hub import from_hub
+from ..schedule import step_time
 from .forward import BackboneForward, ForwardMetadata
 from .setup import BackboneSetup
 
-Mode = Literal["encoder", "projected"]
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_SETTINGS = REPO_ROOT / "configs" / "diffuseq.yaml"
 # Upstream modules used here; they live in the "diffuseq" package of the checkout.
@@ -123,6 +123,15 @@ def checkpoint_directory(spec, offline):
     return folder
 
 
+def load_tokenizer(path: str | Path = DEFAULT_SETTINGS, local_files_only=None):
+    """The tokenizer upstream training saved with the checkpoint, without loading any weights."""
+    from transformers import AutoTokenizer
+
+    settings = read_settings(path)
+    offline = settings["local_files_only"] if local_files_only is None else local_files_only
+    return AutoTokenizer.from_pretrained(str(checkpoint_directory(settings["checkpoint"], offline)))
+
+
 def build_model(upstream, bert_config, training_args):
     """The model and diffusion exactly as upstream basic_utils.create_model_and_diffusion builds them.
 
@@ -185,6 +194,7 @@ class DiffuSeqAdapter:
     """DiffuSeq as a VictimModel (models/interface.py) and a Stage B TokenModel."""
 
     family = "diffuseq"
+    representations = (PROMPT_CODE,)
 
     def __init__(self, *, upstream, torch_model, diffusion, training_args, tokenizer, prompt_length,
                  provenance=None):
@@ -218,7 +228,7 @@ class DiffuSeqAdapter:
     def from_config(cls, path=DEFAULT_SETTINGS, *, local_files_only=None, setup: BackboneSetup = BackboneSetup()):
         """``setup`` picks the victim weights: released checkpoint (default) or random."""
         import torch
-        from transformers import AutoConfig, AutoTokenizer
+        from transformers import AutoConfig
 
         settings = read_settings(path)
         upstream = upstream_modules(settings["diffuseq_root"], settings["diffuseq_commit"])
@@ -230,7 +240,7 @@ class DiffuSeqAdapter:
             raise ValueError("Checkpoint BERT configuration differs from the model settings")
         bert_config = from_hub(lambda local: AutoConfig.from_pretrained(
             config_spec["repo"], revision=config_spec["revision"], local_files_only=local), offline)
-        tokenizer = AutoTokenizer.from_pretrained(str(folder))  # saved by upstream training
+        tokenizer = load_tokenizer(path, offline)  # saved by upstream training, in the same folder
         provenance = {"diffuseq_commit": settings["diffuseq_commit"], "checkpoint": spec,
                       "bert_config": config_spec, "backbone": asdict(setup)}
         if not setup.bottleneck:
@@ -267,8 +277,11 @@ class DiffuSeqAdapter:
 
     # --- VictimModel ---
 
-    def metadata(self, prompt_length, observation_layer, *, time=0.0, forward_mode="first_sampling_pass"):
-        return ForwardMetadata(prompt_length, observation_layer, time=time, forward_mode=forward_mode)
+    def metadata(self, prompt_length, observation_layer, *, step=0, sampling_steps=None):
+        """DiffuSeq's time of sampler call ``step`` is ``step / sampling_steps``: timestep index T - 1 - step."""
+        time = step_time(step, self.sampling_steps if sampling_steps is None else sampling_steps)
+        return ForwardMetadata(prompt_length, observation_layer, time=time,
+                               forward_mode="sampling_pass" if step else "first_sampling_pass")
 
     def forward_map(self, metadata: ForwardMetadata, knowledge: AttackerKnowledge = AttackerKnowledge()):
         return BackboneForward(self, metadata, knowledge)
@@ -313,16 +326,16 @@ class DiffuSeqAdapter:
     def input_embeddings(self, batch: PromptBatch):
         return self.embedding_table[batch.input_ids]
 
-    def encode_embeddings(self, embeddings, batch: PromptBatch, mode: Mode = "projected"):
+    def encode_embeddings(self, embeddings, batch: PromptBatch, representation: str = PROMPT_CODE):
         """The prompt rows of the model input; differentiable in editable embeddings only."""
-        if mode not in ("encoder", "projected"):
-            raise ValueError(f"Unknown target mode {mode!r}")
+        if representation != PROMPT_CODE:
+            raise ValueError(f"Unknown representation {representation!r}; DiffuSeq offers {list(self.representations)}")
         if embeddings.shape != (*batch.input_ids.shape, self.embedding_dim):
             raise ValueError("Supplied embeddings must have shape [batch, prompt_length, embedding_dim]")
         return jnp.where(batch.editable_mask[..., None], embeddings, self.input_embeddings(batch))
 
-    def encode_token_ids(self, batch: PromptBatch, mode: Mode = "projected"):
-        return self.encode_embeddings(self.input_embeddings(batch), batch, mode)
+    def encode_token_ids(self, batch: PromptBatch, representation: str = PROMPT_CODE):
+        return self.encode_embeddings(self.input_embeddings(batch), batch, representation)
 
-    def target_dimension(self, mode) -> int:
+    def target_dimension(self, representation) -> int:
         return self.embedding_dim

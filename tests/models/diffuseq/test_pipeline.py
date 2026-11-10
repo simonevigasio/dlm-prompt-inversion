@@ -5,7 +5,6 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-import jax
 import numpy as np
 import yaml
 
@@ -21,13 +20,12 @@ from elf_inversion.pipeline import invert_observation, invert_prompt
 from elf_inversion.tokens.attack import AttackConfig
 
 SOLVER = SolverConfig(restarts=3, max_iterations=100, residual_atol=1e-4, residual_rtol=1e-5)
-SEARCH = AttackConfig(mode="projected", k=9, max_iterations=3, stopping_loss_tolerance=1e-8)
+SEARCH = AttackConfig(k=9, max_iterations=3, stopping_loss_tolerance=1e-8)
 
 
 class DiffuSeqPipelineTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        jax.config.update("jax_default_matmul_precision", "highest")
         cls.adapter = tiny_diffuseq_adapter()
 
     def assert_converged(self, result):
@@ -57,7 +55,7 @@ class DiffuSeqPipelineTests(unittest.TestCase):
     def test_unknown_time_runs_end_to_end(self):
         # Plumbing only. The time enters through a sinusoidal embedding of tau in [0, 1000], so the
         # loss oscillates in the time coordinate and local search from a random time rarely finds it.
-        result = invert_prompt([4], self.adapter, observation_layer=2, time=0.5, solver=SolverConfig(restarts=1),
+        result = invert_prompt([4], self.adapter, observation_layer=2, step=10, solver=SolverConfig(restarts=1),
                                search=SEARCH, start_tokens=[5], knowledge=AttackerKnowledge(knows_time=False))
         self.assertTrue(np.isfinite(result.stage_a.absolute_residual))
         self.assertEqual(result.evaluation["true_time"], 0.5)
@@ -91,7 +89,7 @@ class DiffuSeqCommandTests(unittest.TestCase):
     def write_config(self, root, **overrides):
         (root / "model.yaml").write_text("family: diffuseq\n")
         (root / "stage_a.yaml").write_text(yaml.safe_dump({"restarts": 2, "max_iterations": 100}))
-        (root / "stage_b.yaml").write_text(yaml.safe_dump({"mode": "projected", "k": 9, "max_iterations": 2}))
+        (root / "stage_b.yaml").write_text(yaml.safe_dump({"k": 9, "max_iterations": 2}))
         config = {"model": "model.yaml", "stage_a": "stage_a.yaml", "stage_b": "stage_b.yaml",
                   "synthetic_observation": {"observation_layer": 1}, **overrides}
         (root / "pipeline.yaml").write_text(yaml.safe_dump(config))

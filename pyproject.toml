@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "elf-prompt-inversion"
 version = "0.2.0"
-description = "Recover ELF prompts from hidden states: backbone inversion (Stage A) and token search (Stage B)"
+description = "Recover the prompt of a diffusion language model (ELF, DiffuSeq) from a hidden state: backbone inversion (Stage A) and token search (Stage B)"
 requires-python = ">=3.10,<3.13"
 dependencies = [
   "jax==0.4.38", "jaxlib==0.4.38", "flax==0.10.2",

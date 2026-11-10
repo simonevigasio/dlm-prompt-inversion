@@ -195,21 +195,19 @@ class BackboneForward:
         x = x[:, self.prefix_length:]
         return x[:, self.first_idx_observed_row:]
 
-    def initialize(self, seed, prompt_std=1.0, noise_std=1.0):
+    def initialize(self, seed, prompt_std=1.0):
         """Push forward independent raw draws; projected noise is NOT N(0,I).
 
         N(0,prompt_std² I) in normalized encoder space is an explicit heuristic
         for C, not a learned/empirical encoder prior. Noise follows ELF's actual
-        first-pass law N(0, denoiser_noise_scale² I) before projection if the noise
-        scale is known. A later pass starts from the noise share of z_t, (1 - t) 
-        times that draw, with a zero previous prediction: a heuristic, since z_t 
-        and x_pred_prev are unknown.
+        first-pass law N(0, denoiser_noise_scale² I) before projection if the
+        attacker knows the noise scale, else N(0, noise_scale_guess² I). A later
+        pass starts from the noise share of z_t, (1 - t) times that draw, with a
+        zero previous prediction: a heuristic, since z_t and x_pred_prev are unknown.
         """
         if not np.isfinite(prompt_std) or prompt_std < 0:
             raise ValueError("prompt_std must be finite and nonnegative")
-        noise_std = self.adapter.config.denoiser_noise_scale if self.knowledge.knows_noise_scale else noise_std
-        if not np.isfinite(noise_std) or noise_std < 0: 
-            raise ValueError("noise_std must be finite and nonnegative")
+        noise_std = self.knowledge.noise_scale(self.adapter.config.denoiser_noise_scale)
         pk, gk = jax.random.split(jax.random.PRNGKey(seed))
         tk = jax.random.fold_in(jax.random.PRNGKey(seed), 1)
         t0 = jax.random.uniform(tk, minval=0.01, maxval=0.99) if not self.knowledge.knows_time else self.metadata.time
@@ -222,9 +220,8 @@ class BackboneForward:
         if not self.knowledge.knows_time: 
             x = jnp.append(x, jax.scipy.special.logit(t0))
         return x
-        
 
-    def algebraic(self, observation):
+    def closed_form(self, observation):
         """Unique code coordinates only if each restricted proj2 map is injective.
 
         Returns None for deeper layers or deficient rank; never claims to recover

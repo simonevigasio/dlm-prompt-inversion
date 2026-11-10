@@ -22,6 +22,10 @@ N(0, I) noise. So, with E the token embedding table:
 
 ``up`` is upstream's tanh MLP (absent without the bottleneck). There is no
 self-conditioning, so a later call has the same unknowns as the first one.
+
+The observation H holds the prompt rows, then the generated rows, and nothing else. The
+[CLS] and [SEP] rows take part in every layer (attention) but are not observed, like ELF's
+prefix rows.
 """
 from dataclasses import dataclass
 import math
@@ -158,19 +162,26 @@ class BackboneForward:
             "prompt_rank_cutoff": float(pc), "noise_rank_cutoff": float(gc),
             "latent_parameterization": "token_embedding_rows",
         }
-        # Hiding the prompt hides the whole source block, whose rows carry no other information.
-        self.first_idx_observed_row = 0 if knowledge.observed_rows == "all" else self.source_length
+        # Row numbering of the observation: prompt rows first, then the generated rows.
+        self.first_idx_observed_row = 0 if knowledge.observed_rows == "all" else self.n
         table = adapter.embedding_matrix
         self._cls = table[adapter.cls_token_id][None, None]
         self._sep = jnp.tile(table[adapter.sep_token_id][None, None], (1, 2, 1))
 
+    def text_rows(self, full_state):
+        """The prompt rows, then the generated rows, of a full [1, seq_len, hidden] state.
+
+        Drops [CLS] and [SEP] [SEP]: they are DiffuSeq's fixed format, neither prompt nor noise.
+        """
+        return jnp.concatenate([full_state[:, 1:self.n + 1], full_state[:, self.source_length:]], axis=1)
+
     def select_rows(self, hidden_state):
-        """hidden_state holds all rows; the result matches observation_shape."""
+        """hidden_state holds the prompt and generated rows; the result matches observation_shape."""
         return hidden_state[:, self.first_idx_observed_row:]
 
     @property
     def observation_shape(self):
-        return (1, self.length - self.first_idx_observed_row, self.adapter.hidden_size)
+        return (1, self.n + self.generated - self.first_idx_observed_row, self.adapter.hidden_size)
 
     def codes(self, coordinates):
         p = coordinates[:self.split].reshape(1, self.n, self.prompt_rank) @ self.prompt_basis + self.bias
@@ -199,20 +210,20 @@ class BackboneForward:
         h = embed(a.params, self.inputs(coordinates), timesteps, a.hidden_t_dim, a.layer_norm_eps)
         for i in range(self.metadata.observation_layer):
             h = bert_layer(a.params, i, h, a.n_heads, a.layer_norm_eps)
-        return h[:, self.first_idx_observed_row:]
+        # The [CLS]/[SEP] rows take part in every layer but are not observed.
+        return self.text_rows(h)[:, self.first_idx_observed_row:]
 
-    def initialize(self, seed, prompt_std=1.0, noise_std=1.0):
+    def initialize(self, seed, prompt_std=1.0):
         """Independent draws: prompt rows N(0, prompt_std² I), generated rows DiffuSeq's N(0, I).
 
         N(0, I) is also how upstream initializes the embeddings before training (a heuristic
-        for trained ones). At a later call the generated rows start from the noise share of x_t,
-        sqrt(1 - alpha_bar(t0)) times the draw: a heuristic, since x_t is unknown.
+        for trained ones). If the attacker does not know the noise scale, the generated rows
+        use noise_scale_guess instead of 1. At a later call they start from the noise share
+        of x_t, sqrt(1 - alpha_bar(t0)) times the draw: a heuristic, since x_t is unknown.
         """
         if not np.isfinite(prompt_std) or prompt_std < 0:
             raise ValueError("prompt_std must be finite and nonnegative")
-        noise_std = 1.0 if self.knowledge.knows_noise_scale else noise_std
-        if not np.isfinite(noise_std) or noise_std < 0:
-            raise ValueError("noise_std must be finite and nonnegative")
+        noise_std = self.knowledge.noise_scale(1.0)
         pk, gk = jax.random.split(jax.random.PRNGKey(seed))
         tk = jax.random.fold_in(jax.random.PRNGKey(seed), 1)
         t0 = self.metadata.time if self.knowledge.knows_time else jax.random.uniform(tk, minval=0.01, maxval=0.99)
@@ -226,6 +237,6 @@ class BackboneForward:
             x = jnp.append(x, jax.scipy.special.logit(t0))
         return x
 
-    def algebraic(self, observation):
+    def closed_form(self, observation):
         """None: even layer 0 is nonlinear (tanh up-projection and LayerNorm)."""
         return None

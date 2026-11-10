@@ -1,9 +1,11 @@
-# Stage A: matrix-free Levenberg-Marquardt over the reachable bottleneck codes.
+# Stage A: matrix-free Levenberg-Marquardt over the model's reachable codes.
 # Observation metadata (prompt length, layer, ...) travels with each observation,
 # not with the solver, so the same settings work for every layer.
 #
 # Every setting uses its default from SolverConfig
 # (src/backbone/solver.py); list here only what should differ, e.g.
-#   restarts: 5
+#   restarts: 5              # random starts; the lowest residual wins
 #   max_iterations: 100
+#   prompt_start_std: 1.0    # std of the random start of the prompt codes
+#   use_closed_form: false   # always iterate, even where an exact solution exists (ELF layer 0)
 # The full effective settings of each run are saved in its manifest.json.

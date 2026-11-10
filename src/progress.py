@@ -53,15 +53,14 @@ class ProgressLogger:
         self._file.write((canonical(row) + "\n").encode("utf-8"))
         self._file.flush()
         self._last_write = now
-        if row.get("console", True):
-            print(f"[{duration(row['elapsed_seconds'])}] {row['message']}", flush=True)
+        print(f"[{duration(row['elapsed_seconds'])}] {row['message']}", flush=True)
 
     def _heartbeat(self):
         while not self._stop.wait(self.interval):
             with self._lock:
                 now = perf_counter()
                 if self._state and now - self._last_write >= self.interval:
-                    self._write({**self._state, "event": "heartbeat", "console": True,
+                    self._write({**self._state, "event": "heartbeat",
                         "stage_elapsed_seconds": now - self._stage_start,
                         "message": f"Still working: {self._state['message']} (phase elapsed {duration(now - self._stage_start)})"}, now)
 

@@ -3,9 +3,9 @@
 The victim model is the family named by the config's model settings file
 (``family:`` in e.g. configs/model.yaml or configs/diffuseq.yaml; ELF when absent).
 
-    python run_pipeline.py --config configs/pipeline/layer_3.yaml \\
+    python run_pipeline.py --config configs/pipeline/example.yaml \\
         --dataset prompts/example.jsonl --output outputs/pipeline/example
-    python run_pipeline.py --config configs/pipeline/layer_3.yaml \\
+    python run_pipeline.py --config configs/pipeline/example.yaml \\
         --dataset data/dolly/dolly-20-tokens-50.jsonl --output outputs/pipeline/dolly-20
 
 ``python -m elf_inversion.cli`` is the same command. --device picks cpu, gpu
@@ -35,7 +35,7 @@ A run writes into --output and resumes there when rerun with the same command:
 
     results.jsonl   one row per (prompt id, repetition): recovered text, scores, Stage A diagnostics
     summary.json    exact-recovery rate, mean token accuracy, Stage A convergence rate
-    manifest.json   configuration, dataset and source hashes (the resume identity)
+    manifest.json   configuration, dataset and source hashes (the resume identity), model provenance
     progress.jsonl  live progress events (the same lines are printed to the console)
 
 Follow a running experiment from another terminal with
@@ -52,7 +52,6 @@ import json
 from pathlib import Path
 from time import perf_counter
 
-import jax
 import numpy as np
 import yaml
 
@@ -66,11 +65,12 @@ from .progress import ProgressLogger
 from .runs import (append_result, canonical, digest, file_sha256, json_safe, locked_directory,
                    read_results, write_manifest)
 from .tokens.attack import AttackConfig
+from .tokens.interface import PROMPT_CODE
 from .backbone.knowledge import AttackerKnowledge
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 # synthetic_observation keys every family accepts; each family adds its OBSERVATION_OPTIONS.
-SYNTHETIC_KEYS = {"observation_layer", "noise_seed", "time", "sampling_steps"}
+SYNTHETIC_KEYS = {"observation_layer", "noise_seed", "step", "sampling_steps"}
 RESULT_KEY = ("example_id", "repetition")
 # Noise seeds tried per (prompt, repetition) before it is skipped for a Stage A forward mismatch.
 NOISE_ATTEMPTS = 3
@@ -112,8 +112,8 @@ def load_config(path):
     stage_b = yaml.safe_load((path.parent / raw["stage_b"]).read_text()) or {}
     solver = SolverConfig(**stage_a)
     search = AttackConfig(**stage_b)
-    if search.mode != "projected":
-        raise ValueError("Stage A recovers projected codes; Stage B must use mode: projected")
+    if search.representation != PROMPT_CODE:
+        raise ValueError(f"Stage A recovers the prompt code; Stage B must use representation: {PROMPT_CODE}")
     # Prompts come only from the --dataset file, never from the config.
     synthetic = raw["synthetic_observation"]
     allowed = SYNTHETIC_KEYS | set(family.OBSERVATION_OPTIONS)
@@ -139,7 +139,7 @@ def generation_options(synthetic):
     return {**{key: value for key, value in synthetic.items() if key not in SYNTHETIC_KEYS},
             "observation_layer": synthetic["observation_layer"],
             "noise_seed": synthetic.get("noise_seed", 100),
-            "time": synthetic.get("time", 0.0),
+            "step": synthetic.get("step", 0),
             "sampling_steps": synthetic.get("sampling_steps")}
 
 
@@ -202,7 +202,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Invert every prompt of a dataset: hidden state -> Stage A -> Stage B. "
                     "For a single prompt, use elf_inversion.invert_prompt from Python.")
-    parser.add_argument("--config", type=Path, required=True, help="Pipeline config, e.g. configs/pipeline/layer_3.yaml")
+    parser.add_argument("--config", type=Path, required=True, help="Pipeline config, e.g. configs/pipeline/example.yaml")
     parser.add_argument("--dataset", type=Path, required=True,
                         help="JSONL file of prompts (string id and text, one or more rows)")
     parser.add_argument("--output", type=Path, required=True,
@@ -219,7 +219,6 @@ def main(argv=None):
     config = load_config(args.config)
     output = args.output.absolute()
 
-    jax.config.update("jax_default_matmul_precision", "highest")
     device = start_jax_backend(args.device)
     output.mkdir(parents=True, exist_ok=True)
     print(f"Results and progress log: {output}", flush=True)
@@ -233,8 +232,7 @@ def load_adapter(config, report):
     setup = config.backbone
     weights = (f"pinned {config.family} checkpoint" if setup.weights == "checkpoint"
                else f"random {config.family} weights (init_seed {setup.init_seed})")
-    bottleneck = f", bottleneck {'on' if setup.bottleneck else 'off'}" if hasattr(setup, "bottleneck") else ""
-    report("model_loading_start", f"Loading {weights}{bottleneck} "
+    report("model_loading_start", f"Loading {weights}, bottleneck {'on' if setup.bottleneck else 'off'} "
            "(local_files_only from the model settings)", family=config.family, backbone=asdict(setup))
     adapter = models.family(config.family).Adapter.from_config(config.model, setup=setup)
     report("model_loading_done", "Model loaded")
@@ -275,9 +273,11 @@ def dataset_row(example, repetition, seeds, result: InversionResult, seconds):
             "token_accuracy": evaluation["stage_b_token_accuracy"],
             "final_loss": None if best is None else best.final_loss,
             "stage_b_stop_reason": None if best is None else best.stop_reason,
-            "prompt_code_error": evaluation["prompt_code_error"], "noise_code_error": evaluation["noise_code_error"],
-            "recovered_time": evaluation["recovered_time"], "true_time": evaluation["true_time"],
-            "time_error": evaluation["time_error"],
+            **{key: evaluation[key] for key in (
+                "prompt_code_error", "prompt_code_relative_error", "noise_code_error", "noise_code_relative_error",
+                # The recovered time and its errors exist only when Stage A had to recover the time.
+                "true_time", "recovered_time", "time_error")
+               if key in evaluation},
             "stage_a": {key: getattr(recovered, key) for key in (
                 "method", "converged", "stop_reason", "absolute_residual", "relative_residual",
                 "iterations", "runtime_seconds")},
@@ -300,6 +300,7 @@ def summarize_dataset(rows, total, repetitions):
     return {"prompts": total, "repetitions": repetitions, "runs": total * repetitions,
             "completed": len(done), "skipped": sum(skipped.values()), "skipped_reasons": skipped,
             "pending": total * repetitions - len(rows),
+            # The rates and means below are over completed runs only; skipped runs are counted above.
             "exact_recovery_rate": mean([r["exact_recovery"] for r in done]),
             "mean_token_accuracy": mean([r["token_accuracy"] for r in done]),
             "stage_a_convergence_rate": mean([r["stage_a"]["converged"] for r in done]),
@@ -338,16 +339,29 @@ def open_dataset_run(config, dataset_path, output):
     return run_id
 
 
+def record_provenance(manifest_path, provenance):
+    """Save where the loaded weights came from in the manifest, once.
+
+    It is written after the model is loaded, so it is not part of the resume identity
+    (the settings that decide it, model file and ``backbone:``, already are).
+    """
+    manifest = json.loads(manifest_path.read_text())
+    if "model_provenance" not in manifest:
+        write_manifest(manifest_path, {**manifest, "model_provenance": json_safe(provenance)})
+
+
 def run_dataset(config, dataset_path, output, report, progress_interval=10.0):
     """Invert every (prompt, repetition) into the locked ``output``; completed ones are skipped on rerun.
 
     Prompts that cannot be inverted (empty, special tokens, longer than the model's
-    conditioning prefix) are recorded as skipped with their reason.
+    conditioning prefix) are recorded as skipped with their reason. So is a run whose
+    observation fails the forward check for NOISE_ATTEMPTS noise seeds; every rejected seed
+    is kept in its row (``rejected_noise_seeds``) and counted in the summary (``forward_mismatches``).
     """
     examples = read_dataset(dataset_path)
     run_id = open_dataset_run(config, dataset_path, output)
     results_path = output / "results.jsonl"
-    rows = read_results(results_path, repair_tail=True, key=RESULT_KEY)
+    rows = read_results(results_path, RESULT_KEY, repair_tail=True)
     completed = {tuple(row[k] for k in RESULT_KEY) for row in rows}
     total, repetitions = len(examples), config.repetitions
     pending = [(e, r) for e in examples for r in range(repetitions) if (e["id"], r) not in completed]
@@ -357,6 +371,7 @@ def run_dataset(config, dataset_path, output, report, progress_interval=10.0):
         write_dataset_summary(output, rows, total, repetitions)
         return
     adapter = load_adapter(config, report)
+    record_provenance(output / "manifest.json", adapter.provenance)
     options = {**generation_options(config.synthetic_observation), **inversion_options(config, progress_interval)}
     for number, (example, repetition) in enumerate(pending, len(completed) + 1):
         label = f"[{number}/{total * repetitions}] {example['id']} r={repetition}"

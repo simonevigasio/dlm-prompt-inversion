@@ -1,4 +1,4 @@
-"""Heartbeat, log recovery, and standard-library timing export checks."""
+"""Heartbeat and recovery of a partially written progress log."""
 from contextlib import redirect_stdout
 import io
 import json
@@ -27,12 +27,12 @@ class ProgressTests(unittest.TestCase):
                         received.set()
 
                 with patch.object(log, "_write", side_effect=capture):
-                    log.report("encoder_start", "Computing encoder forward", trial_id="trial")
+                    log.report("encoder_start", "Computing encoder forward", example_id="trial")
                     self.assertTrue(received.wait(timeout=2), "No heartbeat during a blocked phase")
             rows = [json.loads(line) for line in path.read_text().splitlines()]
             self.assertEqual(rows[0], {"event": "old"})
             beat = next(r for r in rows if r["event"] == "heartbeat")
-            self.assertEqual(beat["trial_id"], "trial")
+            self.assertEqual(beat["example_id"], "trial")
             self.assertGreater(beat["stage_elapsed_seconds"], 0)
             self.assertIn("Still working", output.getvalue())
             self.assertFalse(log._thread.is_alive())

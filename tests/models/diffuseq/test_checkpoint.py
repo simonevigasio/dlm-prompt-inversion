@@ -2,7 +2,6 @@
 import os
 import unittest
 
-import jax
 import numpy as np
 
 from elf_inversion.models.diffuseq.adapter import DiffuSeqAdapter
@@ -14,7 +13,6 @@ from elf_inversion.observation import generate, prompt_tokens
 class CheckpointTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        jax.config.update("jax_default_matmul_precision", "highest")
         cls.adapter = DiffuSeqAdapter.from_config(local_files_only=True)
 
     def test_release(self):
@@ -26,14 +24,15 @@ class CheckpointTests(unittest.TestCase):
     def test_native_forward_equivalence(self):
         # generate() raises ForwardMismatch unless the JAX map reproduces the PyTorch sampler.
         tokens = prompt_tokens(self.adapter, prompt="how can i learn python quickly?")
-        for layer, time in ((0, 0.0), (3, 0.0), (12, 0.0), (3, 0.01)):
-            with self.subTest(layer=layer, time=time):
-                observation, adapter = generate(self.adapter, tokens, observation_layer=layer, time=time)
-                self.assertEqual(observation.hidden_state.shape, (1, 128, 768))
+        for layer, step in ((0, 0), (3, 0), (12, 0), (3, 20)):
+            with self.subTest(layer=layer, step=step):
+                observation, adapter = generate(self.adapter, tokens, observation_layer=layer, step=step)
+                # Prompt rows + generated rows: the 128 rows without [CLS] and [SEP] [SEP].
+                self.assertEqual(observation.hidden_state.shape, (1, 125, 768))
                 self.assertLess(observation.generator["forward_equivalence"]["maximum_absolute_error"], 1e-4)
                 np.testing.assert_array_equal(
                     observation.truth["prompt_code"],
-                    adapter.encode_token_ids(adapter.prepare_token_ids(tokens), "projected"))
+                    adapter.encode_token_ids(adapter.prepare_token_ids(tokens), "prompt_code"))
 
 
 if __name__ == "__main__":

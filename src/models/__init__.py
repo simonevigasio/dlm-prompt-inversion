@@ -7,14 +7,22 @@ Each family lives in ``models/<name>/`` and has a ``family.py`` module with:
     BackboneSetup        the victim-weights toggles of a pipeline config's ``backbone:`` section
     OBSERVATION_OPTIONS  model-specific keys of ``synthetic_observation`` (passed to Adapter.metadata)
     load_metadata(dict)  ForwardMetadata from a saved observation.json
+    load_tokenizer(path) the family's tokenizer alone, from a model settings file (no weights)
 
 A model settings file (e.g. configs/model.yaml) names its family with ``family:``;
 files without the key are ELF settings.
+
+Importing this package fixes JAX's matmul precision to "highest", so the command, the
+Python API and the tests all compute with the same numerics on every device (on a GPU the
+default precision is lower and the forward maps drift from the models' own samplers).
 """
 from importlib import import_module
 from pathlib import Path
 
+import jax
 import yaml
+
+jax.config.update("jax_default_matmul_precision", "highest")
 
 FAMILIES = ("elf", "diffuseq")
 DEFAULT_FAMILY = "elf"

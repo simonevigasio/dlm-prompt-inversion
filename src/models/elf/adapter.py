@@ -15,7 +15,6 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-from typing import Literal
 
 import flax.core
 import jax
@@ -23,12 +22,13 @@ import jax.numpy as jnp
 import numpy as np
 import yaml
 
-from elf_inversion.backbone.knowledge import AttackerKnowledge
-from elf_inversion.models.hub import from_hub as _from_hub
-from elf_inversion.models.elf.forward import BackboneForward, ForwardMetadata
-from elf_inversion.models.elf.setup import BackboneSetup
+from ...backbone.knowledge import AttackerKnowledge
+from ...tokens.interface import PROMPT_CODE
+from ..hub import from_hub
+from ..schedule import step_time
+from .forward import BackboneForward, ForwardMetadata
+from .setup import BackboneSetup
 
-Mode = Literal["encoder", "projected"]
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_SETTINGS = REPO_ROOT / "configs" / "model.yaml"
 
@@ -106,6 +106,35 @@ def read_settings(path: str | Path = DEFAULT_SETTINGS):
     return settings
 
 
+def load_tokenizer(path: str | Path = DEFAULT_SETTINGS, local_files_only=None):
+    """The pinned tokenizer of a model settings file, without loading any model weights."""
+    from transformers import AutoTokenizer
+
+    settings = read_settings(path)
+    spec = settings["tokenizer"]
+    offline = settings["local_files_only"] if local_files_only is None else local_files_only
+    return from_hub(lambda local: AutoTokenizer.from_pretrained(
+        spec["repo"], revision=spec["revision"], local_files_only=local), offline)
+
+
+def build_denoiser(native, config, text_dim, vocab_size, setup: BackboneSetup = BackboneSetup()):
+    """The ELF denoiser module, built as upstream eval.py does.
+
+    Without the bottleneck the text projection is square (text_dim -> text_dim), so proj1
+    can be invertible; ``config.bottleneck_dim`` is updated to match.
+    """
+    if not setup.bottleneck:
+        config.bottleneck_dim = text_dim
+    return native["model"].ELF_models[config.model](
+        text_encoder_dim=text_dim, max_length=config.max_length,
+        attn_drop=config.attn_dropout, proj_drop=config.proj_dropout,
+        bottleneck_dim=config.bottleneck_dim, num_time_tokens=config.num_time_tokens,
+        num_self_cond_cfg_tokens=config.num_self_cond_cfg_tokens,
+        num_model_mode_tokens=config.num_model_mode_tokens,
+        vocab_size=vocab_size,  # exactly eval.py
+    )
+
+
 def frozen_params(params):
     return flax.core.freeze(jax.tree_util.tree_map(lambda x: jax.lax.stop_gradient(jnp.asarray(x)), params))
 
@@ -132,7 +161,7 @@ def _load_denoiser_params(native, config, spec, offline):
     """
     from huggingface_hub import snapshot_download
 
-    snapshot = Path(_from_hub(lambda local: snapshot_download(
+    snapshot = Path(from_hub(lambda local: snapshot_download(
         repo_id=spec["repo"], revision=spec["revision"],
         cache_dir=os.path.expanduser(spec["cache_dir"]), local_files_only=local,
         allow_patterns=[spec["checkpoint"] + "/**", spec["config"]],
@@ -154,6 +183,7 @@ def _load_denoiser_params(native, config, spec, offline):
     params = state[spec["parameters"]]  # ELF generation uses EMA, not raw params.
     return params, {"checkpoint_path": checkpoint_path, "step": int(state["step"]),
                     "epoch": float(state["epoch"])}
+
 
 def _random_denoiser_params(model, config, setup: BackboneSetup):
     """Denoiser parameters drawn from ``setup`` instead of the released checkpoint.
@@ -218,7 +248,10 @@ class ELFAdapter:
     """ELF as a VictimModel (models/interface.py) and a Stage B TokenModel."""
 
     family = "elf"
-    # Steps of the uniform schedule a later-pass observation is sampled on (ELF's sampling configs use 64).
+    # Stage B targets: the bottleneck code Stage A recovers, or the T5 encoder output C itself.
+    ENCODER_STATE = "encoder_state"
+    representations = (PROMPT_CODE, ENCODER_STATE)
+    # Sampler calls of the uniform schedule (ELF's sampling configs use 64).
     sampling_steps = 64
 
     def __init__(self, *, native, config, tokenizer, encoder, encoder_params,
@@ -254,15 +287,15 @@ class ELFAdapter:
             _ = self.gamma, self.projection_bias
 
     @classmethod
-    def from_config(cls, path=DEFAULT_SETTINGS, *, projected=True,
+    def from_config(cls, path=DEFAULT_SETTINGS, *, load_denoiser=True,
                     local_files_only=None, setup: BackboneSetup = BackboneSetup()):
         """``setup`` picks the victim denoiser: released checkpoint (default) or
         random weights, with or without the bottleneck. The encoder is always the
-        pretrained one."""
-        if not projected and setup != BackboneSetup():
-            raise ValueError("A backbone setup needs projected=True: encoder mode loads no denoiser")
+        pretrained one. ``load_denoiser=False`` loads the encoder alone: enough for Stage B
+        on "encoder_state" targets, not for Stage A or the prompt code."""
+        if not load_denoiser and setup != BackboneSetup():
+            raise ValueError("A backbone setup needs load_denoiser=True: it describes the denoiser")
         from huggingface_hub import hf_hub_download
-        from transformers import AutoTokenizer
 
         settings = read_settings(path)
         native = native_modules(settings["elf_root"], settings["elf_commit"])
@@ -274,10 +307,8 @@ class ELFAdapter:
         if f'{enc_spec["repo"]}/{enc_spec["filename"]}' != config.encoder_checkpoint:
             raise ValueError("Encoder checkpoint differs from ELF configuration")
 
-        tokenizer = _from_hub(lambda local: AutoTokenizer.from_pretrained(
-            tok_spec["repo"], revision=tok_spec["revision"], local_files_only=local,
-        ), offline)
-        enc_path = _from_hub(lambda local: hf_hub_download(
+        tokenizer = load_tokenizer(path, offline)
+        enc_path = from_hub(lambda local: hf_hub_download(
             repo_id=enc_spec["repo"], revision=enc_spec["revision"],
             filename=enc_spec["filename"], local_files_only=local), offline)
         ec, encoder, _ = native["t5"].get_encoder(config.encoder_model_name, jnp.float32)
@@ -286,18 +317,8 @@ class ELFAdapter:
                       "encoder": enc_spec, "encoder_path": enc_path}
 
         model, params = None, None
-        if projected:
-            if not setup.bottleneck:
-                # Square text projection (d_model -> d_model): proj1 can be invertible.
-                config.bottleneck_dim = ec.d_model
-            model = native["model"].ELF_models[config.model](
-                text_encoder_dim=ec.d_model, max_length=config.max_length,
-                attn_drop=config.attn_dropout, proj_drop=config.proj_dropout,
-                bottleneck_dim=config.bottleneck_dim, num_time_tokens=config.num_time_tokens,
-                num_self_cond_cfg_tokens=config.num_self_cond_cfg_tokens,
-                num_model_mode_tokens=config.num_model_mode_tokens,
-                vocab_size=tokenizer.vocab_size,  # exactly eval.py
-            )
+        if load_denoiser:
+            model = build_denoiser(native, config, ec.d_model, tokenizer.vocab_size, setup)
             if setup.weights == "checkpoint":
                 spec = settings["denoiser"]
                 params, denoiser_provenance = _load_denoiser_params(native, config, spec, offline)
@@ -319,11 +340,13 @@ class ELFAdapter:
         adapter.prompt_length = int(prompt_length)
         return adapter
 
-    def metadata(self, prompt_length, observation_layer, *, time=0.0, forward_mode="first_sampling_pass",
+    def metadata(self, prompt_length, observation_layer, *, step=0, sampling_steps=None,
                  self_cond_cfg_scale=1.0, attention_mask=None) -> ForwardMetadata:
+        """ELF's time of sampler call ``step`` is ``step / sampling_steps`` (uniform Euler schedule)."""
+        time = step_time(step, self.sampling_steps if sampling_steps is None else sampling_steps)
         return ForwardMetadata(prompt_length, observation_layer, time=time, self_cond_cfg_scale=self_cond_cfg_scale,
                                attention_mask=None if attention_mask is None else tuple(attention_mask),
-                               forward_mode=forward_mode)
+                               forward_mode="sampling_pass" if step else "first_sampling_pass")
 
     def forward_map(self, metadata: ForwardMetadata, knowledge: AttackerKnowledge = AttackerKnowledge()):
         return BackboneForward(self, metadata, knowledge)
@@ -383,10 +406,10 @@ class ELFAdapter:
             self.encoder_params, self.config.latent_mean, self.config.latent_std,
         )
 
-    def encode_token_ids(self, batch: PromptBatch, mode: Mode = "encoder"):
-        return self._target(self.encode_text(batch)[:, :batch.prompt_length], mode)
+    def encode_token_ids(self, batch: PromptBatch, representation: str = ENCODER_STATE):
+        return self._target(self.encode_text(batch)[:, :batch.prompt_length], representation)
 
-    def encode_embeddings(self, embeddings, batch: PromptBatch, mode: Mode = "encoder"):
+    def encode_embeddings(self, embeddings, batch: PromptBatch, representation: str = ENCODER_STATE):
         """Differentiable in editable input embeddings only; model params stay fixed."""
         if embeddings.shape != (*batch.input_ids.shape, self.encoder.config.d_model):
             raise ValueError("Supplied embeddings must have shape [batch, full_length, d_model]")
@@ -395,18 +418,18 @@ class ELFAdapter:
                                inputs_embeds=inputs, attention_mask=batch.encoder_attention_mask,
                                deterministic=True)["last_hidden_state"]
         c = ((raw - self.config.latent_mean) / self.config.latent_std)[:, :batch.prompt_length]
-        return self._target(c, mode)
+        return self._target(c, representation)
 
-    def _target(self, c, mode):
-        if mode == "encoder":
+    def _target(self, c, representation):
+        if representation == self.ENCODER_STATE:
             return c
-        if mode == "projected":
+        if representation == PROMPT_CODE:
             return self.project(c)
-        raise ValueError(f"Unknown target mode {mode!r}")
+        raise ValueError(f"Unknown representation {representation!r}; ELF offers {list(self.representations)}")
 
     def _projection_params(self):
         if self.model_params is None:
-            raise ValueError("Projected mode requires a loaded ELF checkpoint")
+            raise ValueError("The prompt code requires a loaded ELF denoiser")
         wb = self.model_params["text_proj"]["proj1"]["kernel"]
         sc = self.model_params.get("self_cond_proj")
         expect_sc = self.config.self_cond_prob > 0 or self.config.num_self_cond_cfg_tokens > 0
@@ -471,11 +494,11 @@ class ELFAdapter:
             )
         return captured[0][:, :batch.prompt_length]
 
-    def reconstruction_loss(self, embeddings, batch, target, mode: Mode = "encoder"):
-        prediction = self.encode_embeddings(embeddings, batch, mode)
+    def reconstruction_loss(self, embeddings, batch, target, representation: str = ENCODER_STATE):
+        prediction = self.encode_embeddings(embeddings, batch, representation)
         if prediction.shape != target.shape:
             raise ValueError("Target shape must exactly match the prompt representation")
         return jnp.mean(jnp.square(prediction - jax.lax.stop_gradient(target)))
 
-    def target_dimension(self, mode) -> int:
-        return self.encoder.config.d_model if mode == "encoder" else self.config.bottleneck_dim
+    def target_dimension(self, representation) -> int:
+        return self.encoder.config.d_model if representation == self.ENCODER_STATE else self.config.bottleneck_dim

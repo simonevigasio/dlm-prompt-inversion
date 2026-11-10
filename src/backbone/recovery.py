@@ -33,13 +33,13 @@ class RecoveryResult:
     recovered_time: float
 
 
-def _algebraic_result(forward, y, coordinates, config, start):
-    """Wrap the layer-0 least-squares solution; consistency is judged by the same tolerance."""
+def _closed_form_result(forward, y, coordinates, config, start):
+    """Wrap the forward map's closed-form solution; consistency is judged by the same tolerance."""
     absolute = float(jnp.linalg.norm(forward(coordinates) - y))
     norm = float(jnp.linalg.norm(y))
     converged = absolute <= config.residual_atol + config.residual_rtol * norm
     return NumericalResult(coordinates, absolute, relative_residual(absolute, norm), converged,
-                           "residual_tolerance" if converged else "inconsistent_layer_zero_observation",
+                           "residual_tolerance" if converged else "inconsistent_closed_form",
                            0, perf_counter() - start, ())
 
 
@@ -54,7 +54,7 @@ def _numerical_restarts(forward, y, config, progress):
         seed = config.seed + restart
         report("restart_start", f"Stage A restart {restart + 1}/{config.restarts} (seed {seed}); "
                "the first iteration includes JIT compilation", restart=restart, seed=seed)
-        initial = forward.initialize(seed, config.prompt_init_std, config.noise_init_std)
+        initial = forward.initialize(seed, config.prompt_start_std)
         result = levenberg_marquardt(forward, y, initial, config, progress=progress)
         results.append(result)
         report("restart_done", f"Stage A restart {restart + 1}/{config.restarts}: "
@@ -77,12 +77,12 @@ def recover(observation, forward: ForwardMap, config=SolverConfig(), *, progress
     y = jnp.asarray(observation, dtype=jnp.float32)
     if y.shape != forward.observation_shape or not np.isfinite(np.asarray(y)).all():
         raise ValueError(f"Expected finite observation with shape {forward.observation_shape}")
-    algebraic = forward.algebraic(y) if config.algebraic_layer_zero else None
-    if algebraic is not None:
-        method, candidates = "algebraic", [_algebraic_result(forward, y, algebraic, config, start)]
+    exact = forward.closed_form(y) if config.use_closed_form else None
+    if exact is not None:
+        method, candidates = "closed_form", [_closed_form_result(forward, y, exact, config, start)]
     else:
         method, candidates = "levenberg_marquardt", _numerical_restarts(forward, y, config, progress)
-    summaries = [{"restart": i, "seed": None if algebraic is not None else config.seed + i,
+    summaries = [{"restart": i, "seed": None if exact is not None else config.seed + i,
                   "absolute_residual": result.absolute_residual, "relative_residual": result.relative_residual,
                   "converged": result.converged, "stop_reason": result.stop_reason,
                   "iterations": result.iterations, "runtime_seconds": result.runtime_seconds,

@@ -4,7 +4,7 @@
 # starts only when its whole shortlist fits the remaining budget.
 k: 100
 max_iterations: 50
-# 8 positions * 100 candidates * 50 iterations.
+# Enough for prompts of up to 30 tokens: 30 positions * 100 candidates * 50 iterations.
 max_candidate_evaluations: 150000
 stopping_loss_tolerance: 1.0e-8
 # Random restarts on one Stage A result, start seeds seed + restart (default seed 200);

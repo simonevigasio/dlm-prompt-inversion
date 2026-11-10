@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Run the full experiment on a dataset of prompts: ELF hidden state -> Stage A -> Stage B.
+"""Run the full experiment on a dataset of prompts: hidden state -> Stage A -> Stage B.
 
-    python3 run_pipeline.py --config configs/pipeline/layer_3.yaml \\
+    python3 run_pipeline.py --config configs/pipeline/example.yaml \\
         --dataset prompts/example.jsonl --output outputs/pipeline/example
     python3 run_pipeline.py --help
 

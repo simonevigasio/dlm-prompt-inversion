@@ -24,11 +24,14 @@ class SolverConfig:
     max_damping: float = 1e12
     damping_increase: float = 10.0
     damping_decrease: float = 0.3
+    # Random starts: one solve per restart, seeded seed + restart; the lowest residual wins.
     restarts: int = 3
     seed: int = 42
-    prompt_init_std: float = 1.0
-    algebraic_layer_zero: bool = True
-    noise_init_std: float = 1.0 # the guess used when the scale is unknown
+    # Std of the random start of the prompt codes. (The start of the generated rows is the
+    # attacker's knowledge of the noise scale: AttackerKnowledge.)
+    prompt_start_std: float = 1.0
+    # Skip the iterations when the forward map has an exact closed-form solution.
+    use_closed_form: bool = True
 
     def __post_init__(self):
         for name in ("max_iterations", "cg_max_iterations", "stagnation_iterations", "restarts", "seed"):
@@ -39,7 +42,7 @@ class SolverConfig:
         if self.seed + self.restarts > 2**32:
             raise ValueError("Restart seeds must fit uint32")
         for name in ("cg_rtol", "cg_atol", "residual_atol", "residual_rtol", "step_atol",
-                     "step_rtol", "stagnation_rtol", "prompt_init_std", "noise_init_std"):
+                     "step_rtol", "stagnation_rtol", "prompt_start_std"):
             if not np.isfinite(getattr(self, name)) or getattr(self, name) < 0:
                 raise ValueError(f"{name} must be finite and nonnegative")
         if not all(np.isfinite(v) for v in (self.min_damping, self.initial_damping, self.max_damping)):
@@ -50,8 +53,8 @@ class SolverConfig:
             raise ValueError("damping_increase must exceed 1")
         if not 0 < self.damping_decrease < 1:
             raise ValueError("damping_decrease must lie in (0,1)")
-        if type(self.algebraic_layer_zero) is not bool:
-            raise ValueError("algebraic_layer_zero must be boolean")
+        if type(self.use_closed_form) is not bool:
+            raise ValueError("use_closed_form must be boolean")
 
 
 def conjugate_gradient(matvec, rhs, *, rtol, atol, max_iterations):
@@ -176,12 +179,12 @@ def levenberg_marquardt(forward, observation, initial, config=SolverConfig(), *,
                 elapsed = perf_counter() - start
                 # Upper bound: the solve usually stops before max_iterations.
                 eta = elapsed / iteration * (config.max_iterations - iteration)
-                residual = candidate_residual if accepted else absolute
+                current = candidate_residual if accepted else absolute
                 progress("lm_iteration", f"LM iteration {iteration}/{config.max_iterations}: "
-                         f"residual {residual:.6g} (target {tolerance:.3g}), "
+                         f"residual {current:.6g} (target {tolerance:.3g}), "
                          f"{'accepted' if accepted else 'rejected'}, damping {damping:.3g}, "
                          f"{int(cg_iters)} CG steps, at most {eta:.0f}s left",
-                         iteration=iteration, residual=residual, tolerance=tolerance,
+                         iteration=iteration, residual=current, tolerance=tolerance,
                          accepted=bool(accepted), damping=damping, cg_iterations=int(cg_iters),
                          seconds=elapsed, max_eta_seconds=eta)
             small_step = step_norm <= config.step_atol + config.step_rtol * float(jnp.linalg.norm(x))

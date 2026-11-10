@@ -56,16 +56,20 @@ Always known: the weights, the prompt length, the observation layer, the forward
 | flag | default | when off |
 |---|---|---|
 | `observed_rows` | `"all"` | `"generated"`: only the generated rows are observed |
-| `knows_time` | `true` | the time becomes one more unknown, `t = sigmoid(s)` (needs `time > 0`) |
-| `knows_noise_scale` | `true` | random starts do not use ELF's noise scale |
+| `knows_time` | `true` | the time becomes one more unknown, `t = sigmoid(s)` (needs `step > 0`) |
+| `knows_noise_scale` | `true` | random starts draw the generated rows with std `noise_scale_guess` (default 1.0) instead of the model's noise scale (ELF 2.0, DiffuSeq 1.0) |
+
+The noise scale only sets where the solver starts; it is not a constraint on the solution.
 
 ## Solver
 
 Levenberg–Marquardt minimizes `0.5 ||F(u) − H||²` over the code coordinates `u`, solving
 each step with conjugate gradient on JVPs/VJPs (no Jacobian is built). A step is kept only
-if it lowers the loss. Each restart starts from random codes (seed `seed + restart`), and
-the lowest residual wins. At layer 0, with all rows observed and the time known, a direct
-least-squares solve is used when it is unique.
+if it lowers the loss. Each restart starts from random codes (seed `seed + restart`, prompt
+codes with std `prompt_start_std`), and the lowest residual wins. When the forward map has
+an exact solution (`closed_form`: ELF at layer 0, with all rows observed and the time known,
+when the least-squares solve is unique), it is used instead; `use_closed_form: false`
+always iterates.
 
 Settings: `SolverConfig` in `solver.py`; `configs/stage_a/` lists only changed values.
 

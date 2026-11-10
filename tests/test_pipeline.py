@@ -65,11 +65,11 @@ class StageIntegrationTests(unittest.TestCase):
         self.assertIsNotNone(discrete)
 
     def test_unknown_time_is_recovered_by_stage_a(self):
-        # time=0.5 is step 32 of the 64-step schedule, a later sampler call.
+        # Step 32 of ELF's 64-step schedule is a later sampler call, at ELF time 0.5.
         def run(layer, knows_time):
-            return invert_prompt([4], self.adapter, observation_layer=layer, time=0.5,
+            return invert_prompt([4], self.adapter, observation_layer=layer, step=32,
                 solver=SolverConfig(restarts=3, max_iterations=100, residual_atol=1e-4, residual_rtol=1e-5),
-                search=AttackConfig(mode="projected", k=9, max_iterations=3), start_tokens=[5],
+                search=AttackConfig(k=9, max_iterations=3), start_tokens=[5],
                 knowledge=AttackerKnowledge(knows_time=knows_time))
         for layer in (1, 2):
             with self.subTest(layer=layer):
@@ -79,8 +79,11 @@ class StageIntegrationTests(unittest.TestCase):
                 self.assertEqual(e["true_time"], 0.5)
                 self.assertLess(e["time_error"], 1e-2)
                 self.assertTrue(e["stage_b_exact_tokens"])
-        # Known time: Stage A reports the declared time unchanged.
-        self.assertEqual(run(1, knows_time=True).evaluation["time_error"], 0.0)
+        # Known time: there is nothing to recover, so no time error is reported.
+        known = run(1, knows_time=True).evaluation
+        self.assertEqual(known["true_time"], 0.5)
+        for key in ("time_error", "recovered_time"):
+            self.assertNotIn(key, known)
         # Layer 0: the least-squares shortcut has no time coordinate, so Levenberg-Marquardt
         # runs instead. The prompt is still recovered, but the time does not reach the text
         # rows there, so its value is not checked.
@@ -90,12 +93,17 @@ class StageIntegrationTests(unittest.TestCase):
 
     def test_invert_prompt_library_call(self):
         result = invert_prompt([4], self.adapter, observation_layer=0, solver=SolverConfig(restarts=1),
-                               search=AttackConfig(mode="projected", k=9, max_iterations=3), start_tokens=[5])
+                               search=AttackConfig(k=9, max_iterations=3), start_tokens=[5])
         self.assertTrue(result.stage_a.converged)
         np.testing.assert_array_equal(result.tokens, [4])
         self.assertEqual(result.text, "4")
         self.assertEqual(result.stage_b.seeds, (None,))
         self.assertTrue(result.evaluation["stage_b_exact_tokens"])
+        # The relative code error is the absolute one divided by the true code's norm.
+        e, truth = result.evaluation, result.observation.truth
+        self.assertAlmostEqual(e["prompt_code_relative_error"],
+                               e["prompt_code_error"] / np.linalg.norm(truth["prompt_code"]))
+        self.assertLess(e["prompt_code_relative_error"], 1e-4)
         np.testing.assert_array_equal(result.observation.truth["tokens"], [4])
         with self.assertRaisesRegex(ValueError, "start_tokens"):
             invert_prompt([4], self.adapter, observation_layer=0, search=AttackConfig(restarts=2), start_tokens=[5])
@@ -130,7 +138,7 @@ class StageIntegrationTests(unittest.TestCase):
         metadata = ForwardMetadata(1, 0)
         truth = observe(self.adapter, [4], metadata)
         with self.assertRaises(ValueError):
-            run_stages(truth.observation, self.adapter, metadata, attack_config=AttackConfig(mode="encoder"))
+            run_stages(truth.observation, self.adapter, metadata, attack_config=AttackConfig(representation="encoder_state"))
 
 
 if __name__ == "__main__":

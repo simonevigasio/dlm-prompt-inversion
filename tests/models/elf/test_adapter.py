@@ -10,7 +10,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from elf_inversion.models.elf.adapter import (ELFAdapter, _from_hub, _random_denoiser_params,
+from elf_inversion.models.elf.adapter import (ELFAdapter, _random_denoiser_params, build_denoiser,
                                              native_modules, read_settings)
 from elf_inversion.models.elf.setup import BackboneSetup
 from elf_inversion.models.elf.testing import tiny_native_adapter
@@ -61,9 +61,9 @@ class EquivalenceChecks:
 
     def test_token_ids_and_supplied_embeddings(self):
         a, batch = self.adapter, self.batch
-        for mode in ("encoder", "projected"):
-            self.assert_close(a.encode_embeddings(a.input_embeddings(batch), batch, mode),
-                              a.encode_token_ids(batch, mode), mode + " ID/embedding")
+        for representation in ("encoder_state", "prompt_code"):
+            self.assert_close(a.encode_embeddings(a.input_embeddings(batch), batch, representation),
+                              a.encode_token_ids(batch, representation), representation + " ID/embedding")
         self.assert_close(a.encode_token_ids(batch), a.encode_token_ids(batch), "dropout disabled", atol=0, rtol=0)
 
     def test_native_collator_and_contextual_reference(self):
@@ -111,15 +111,15 @@ class EquivalenceChecks:
         x = a.input_embeddings(batch)
         self.assertFalse(bool(batch.editable_mask[0, 0]))
         self.assertEqual(len(batch.editable_positions), len(ids) * (a.prompt_length - 1))
-        for mode in ("encoder", "projected"):
-            target = a.encode_token_ids(batch, mode) + 0.1
-            fn = lambda e: a.reconstruction_loss(e, batch, target, mode)
+        for representation in ("encoder_state", "prompt_code"):
+            target = a.encode_token_ids(batch, representation) + 0.1
+            fn = lambda e: a.reconstruction_loss(e, batch, target, representation)
             value, grad = jax.jit(jax.value_and_grad(fn))(x)
             self.assertTrue(np.isfinite(float(value)))
             self.assertTrue(np.isfinite(np.asarray(grad)).all())
             self.assertGreater(float(jnp.linalg.norm(grad)), 0)
             np.testing.assert_array_equal(np.asarray(grad)[~np.asarray(batch.editable_mask)], 0)
-            print(f"\n{type(self).__name__}: {mode} embedding gradient norm={float(jnp.linalg.norm(grad)):.9g}", flush=True)
+            print(f"\n{type(self).__name__}: {representation} embedding gradient norm={float(jnp.linalg.norm(grad)):.9g}", flush=True)
         changed = jnp.where(batch.editable_mask[..., None], x, x + 10)
         self.assert_close(a.encode_embeddings(changed, batch), a.encode_token_ids(batch), "fixed embeddings")
 
@@ -162,29 +162,24 @@ class CheckpointEquivalence(EquivalenceChecks, unittest.TestCase):
             a.tokenize("short")
 
 
-class HubLoadingModes(unittest.TestCase):
-    def test_auto_reads_cache_first_and_downloads_only_on_a_miss(self):
-        calls = []
+class DenoiserConstruction(unittest.TestCase):
+    """build_denoiser is the part of ELFAdapter.from_config that applies the bottleneck toggle."""
 
-        def cached(local):
-            calls.append(local)
-            return "cache"
-        self.assertEqual(_from_hub(cached, "auto"), "cache")
-        self.assertEqual(calls, [True])
+    def setUp(self):
+        settings = read_settings()
+        self.native = native_modules(settings["elf_root"], settings["elf_commit"])
+        self.config = self.native["config"].Config()
+        self.config.bottleneck_dim = 5
 
-        calls.clear()
+    def test_bottleneck_is_kept_by_default(self):
+        model = build_denoiser(self.native, self.config, 16, 32)
+        self.assertEqual((model.bottleneck_dim, self.config.bottleneck_dim), (5, 5))
+        self.assertEqual((model.text_encoder_dim, model.vocab_size), (16, 32))
 
-        def missing(local):
-            calls.append(local)
-            if local:
-                raise FileNotFoundError("not cached")
-            return "hub"
-        self.assertEqual(_from_hub(missing, "auto"), "hub")
-        self.assertEqual(calls, [True, False])
-        with self.assertRaises(FileNotFoundError):
-            _from_hub(missing, True)
-        with self.assertRaises(ValueError):
-            _from_hub(missing, "yes")
+    def test_without_the_bottleneck_the_projection_is_square(self):
+        setup = BackboneSetup(weights="random", bottleneck=False, init="normal")
+        model = build_denoiser(self.native, self.config, 16, 32, setup)
+        self.assertEqual((model.bottleneck_dim, self.config.bottleneck_dim), (16, 16))
 
 
 class RandomDenoiserParams(unittest.TestCase):

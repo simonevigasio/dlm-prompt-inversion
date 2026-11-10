@@ -1,0 +1,83 @@
+# One pipeline config with every option. Copy it and change what your experiment needs.
+# Lines that are commented out show an option with its default (or an example value).
+# Paths are relative to this file. Every effective value of a run is saved in its manifest.json.
+
+# ---------------------------------------------------------------------------------------------
+# Victim model and the two stages (required)
+# ---------------------------------------------------------------------------------------------
+# The model settings file names the family (family: elf | diffuseq); everything model-specific
+# follows from it. For DiffuSeq use ../diffuseq.yaml.
+model: ../model.yaml
+# Stage A (hidden state -> codes): SolverConfig overrides, see src/backbone/solver.py.
+stage_a: ../stage_a/levenberg_marquardt.yaml
+# Stage B (codes -> tokens): AttackConfig overrides, see src/tokens/attack.py.
+# k16.yaml is a smaller, faster search.
+stage_b: ../stage_b/k100.yaml
+
+# ---------------------------------------------------------------------------------------------
+# How each prompt's hidden state is generated (required: observation_layer)
+# ---------------------------------------------------------------------------------------------
+# Prompts come only from the --dataset file. Each one is run through the model's own sampler,
+# and the hidden state of one model call is captured. It holds the prompt rows and the generated
+# (noise) rows only: never prefix or format rows (ELF's time/scale/mode tokens, DiffuSeq's [CLS]/[SEP]).
+synthetic_observation:
+  # State after this many complete backbone blocks; 0 is the input of the first block.
+  # ELF-B has 12 blocks, DiffuSeq (QQP) 12 BERT layers.
+  observation_layer: 3
+  # Salt of the sampler noise. Each (prompt, repetition) hashes it into its own noise seed.
+  noise_seed: 100
+  # Which sampler call is observed: 0 (default) is the first call, k the k-th call, up to
+  # sampling_steps - 1. The model turns the step into its own time value (ELF: step / 64,
+  # so 32 is time 0.5; DiffuSeq: diffusion timestep 1999 - step).
+  # step: 32
+  # Number of calls of the sampler. Default: the model's own (ELF 64, DiffuSeq 2000 = its
+  # diffusion steps; DiffuSeq accepts no other value, and each step takes about 0.2 s on a CPU).
+  # sampling_steps: 64
+  # ELF only: self-conditioning guidance scale the sampler passes to the backbone (default 1.0).
+  # self_cond_cfg_scale: 1.0
+  # ELF only: one 0/1 entry per text position (default: no mask).
+  # attention_mask: [1, 1, 1, ...]
+
+# ---------------------------------------------------------------------------------------------
+# What the attacker knows (optional; the defaults below mean "knows everything")
+# ---------------------------------------------------------------------------------------------
+# Always known: the weights, the prompt length, the observed layer, first call vs later call.
+attacker_knowledge:
+  # all: prompt + generated rows are observed. generated: the prompt rows are hidden.
+  observed_rows: all
+  # false: Stage A recovers the time of the observed call as one more unknown. Needs step > 0
+  # above: the first call is always at time 0, so there is nothing to recover.
+  knows_time: true
+  # true: Stage A's random starts draw the generated rows with the model's own noise scale
+  # (ELF 2.0, DiffuSeq 1.0). false: they use noise_scale_guess instead.
+  knows_noise_scale: true
+  # Std of the starting noise when knows_noise_scale is false; ignored when it is true.
+  noise_scale_guess: 1.0
+
+# ---------------------------------------------------------------------------------------------
+# Victim weights (optional; default: the released checkpoint)
+# ---------------------------------------------------------------------------------------------
+# weights    checkpoint | random
+# bottleneck true | false. false removes the low-dimensional projection (ELF: square text
+#            projection 512 -> 512; DiffuSeq: 768-wide embeddings, no input_up_proj).
+#            No checkpoint was trained without it, so false needs weights: random.
+# init       upstream (checkpoint only) | normal (random only): every parameter, including
+#            normalization scales, is drawn from N(0, init_std^2).
+# init_seed  rebuilds the same random model. Part of the run identity: a run never resumes
+#            on a different model.
+# To isolate the bottleneck, compare random + bottleneck true against random + bottleneck false;
+# checkpoint against random-without-bottleneck changes two things at once.
+# backbone:
+#   weights: random
+#   bottleneck: false
+#   init: normal
+#   init_std: 0.02
+#   init_seed: 0
+
+# ---------------------------------------------------------------------------------------------
+# Repetitions (optional, default 1)
+# ---------------------------------------------------------------------------------------------
+# Runs per prompt. Repetition r of prompt id uses seeds hash(purpose, seed, id, r) for the noise
+# and for the Stage A and Stage B starts (noise_seed above and the seeds in the stage files are
+# salts), so no seed is shared across prompts or repetitions.
+repetitions: 5

@@ -7,7 +7,7 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 import jax.numpy as jnp
 import numpy as np
 
-from elf_inversion.models.elf.testing import TinyModel
+from elf_inversion.tokens.testing import TinyModel
 from elf_inversion.tokens.attack import (AttackConfig, Replacement, attack, candidate_token_batches,
                             exhaustive_single_token_neighborhood, shortlist_replacements)
 
@@ -37,10 +37,10 @@ class AttackTests(unittest.TestCase):
 
     def test_global_actual_best_beats_linearized_best_in_both_modes(self):
         model = TinyModel()
-        for mode in ("encoder", "projected"):
+        for representation in ("raw", "prompt_code"):
             for batch_size in (1, 3):
-                result = attack(model.target([2, 4], mode), [2, 2], model,
-                                AttackConfig(mode=mode, k=2, candidate_batch_size=batch_size))
+                result = attack(model.target([2, 4], representation), [2, 2], model,
+                                AttackConfig(representation=representation, k=2, candidate_batch_size=batch_size))
                 np.testing.assert_array_equal(result.tokens, [2, 4])
                 self.assertEqual(result.final_loss, 0)
                 self.assertEqual(result.stop_reason, "loss_tolerance")
@@ -56,18 +56,18 @@ class AttackTests(unittest.TestCase):
         model = TinyModel(1, [0, 0, 1, 0.5, 2, 3])
         for atol, rtol in ((0.9375, 0), (0, 0.9375), (0.5, 0.4375)):
             result = attack(jnp.zeros((1, 1, 1)), [2], model,
-                            AttackConfig(mode="encoder", allowed_token_ids=(3,),
+                            AttackConfig(representation="raw", allowed_token_ids=(3,),
                                          acceptance_atol=atol, acceptance_rtol=rtol))
             self.assertEqual(result.stop_reason, "no_improvement")
             self.assertEqual(result.loss_history, (1.0,))
             np.testing.assert_array_equal(result.tokens, [2])
         result = attack(jnp.zeros((1, 1, 1)), [2], model,
-                        AttackConfig(mode="encoder", allowed_token_ids=(3,),
+                        AttackConfig(representation="raw", allowed_token_ids=(3,),
                                      acceptance_atol=0.9374, acceptance_rtol=0, max_iterations=1))
         self.assertEqual(result.loss_history, (1.0, 0.0625))
         equal_model = TinyModel(1, [0, 0, 1, -1, 2, 3])
         equal = attack(jnp.zeros((1, 1, 1)), [2], equal_model,
-                       AttackConfig(mode="encoder", allowed_token_ids=(3,), acceptance_atol=0, acceptance_rtol=0))
+                       AttackConfig(representation="raw", allowed_token_ids=(3,), acceptance_atol=0, acceptance_rtol=0))
         self.assertEqual(equal.stop_reason, "no_improvement")
         self.assertEqual(equal.accepted_substitutions, ())
 
@@ -75,7 +75,7 @@ class AttackTests(unittest.TestCase):
         model = TinyModel()
         for batch_size in (1, 5):
             result = attack(model.target([3, 3]), [2, 2], model,
-                            AttackConfig(mode="encoder", k=16, candidate_batch_size=batch_size))
+                            AttackConfig(representation="raw", k=16, candidate_batch_size=batch_size))
             np.testing.assert_array_equal(result.tokens, [3, 3])
             self.assertEqual([s.position for s in result.accepted_substitutions], [0, 1])
             self.assertEqual(result.counters.gradient_evaluations, 2)
@@ -85,12 +85,12 @@ class AttackTests(unittest.TestCase):
             self.assertTrue(all(a > b for a, b in zip(result.loss_history, result.loss_history[1:])))
         # Two different token IDs yield precisely the same best actual loss.
         tied = TinyModel(1, [0, 0, 1, 2, 2, 5])
-        result = attack(tied.target([4]), [2], tied, AttackConfig(mode="encoder", k=16))
+        result = attack(tied.target([4]), [2], tied, AttackConfig(representation="raw", k=16))
         np.testing.assert_array_equal(result.tokens, [3])
 
     def test_contextual_full_matrix_gradient_changes_after_substitution(self):
         class CoupledModel(TinyModel):
-            def encode_embeddings(self, embeddings, batch, mode="encoder"):
+            def encode_embeddings(self, embeddings, batch, representation="raw"):
                 x = jnp.where(batch.editable_mask[..., None], embeddings,
                               self.input_embeddings(batch))[:, :2, 0]
                 # Both input positions affect both output rows.
@@ -98,7 +98,7 @@ class AttackTests(unittest.TestCase):
 
         model = CoupledModel()
         result = attack(model.target([3, 3]), [2, 2], model,
-                        AttackConfig(mode="encoder", k=1, max_iterations=3))
+                        AttackConfig(representation="raw", k=1, max_iterations=3))
         # Initial loss = ((4-9)^2 + (4-6)^2)/2; each derivative is -12.
         # After accepting [5,2], derivatives become +3,+6. Fresh shortlists
         # cannot improve; stale negative derivatives would wrongly propose [4,2].
@@ -112,36 +112,36 @@ class AttackTests(unittest.TestCase):
         model = TinyModel()
         for budget in (0, 3):
             result = attack(model.target([3, 3]), [2, 2], model,
-                            AttackConfig(mode="encoder", k=2, max_candidate_evaluations=budget))
+                            AttackConfig(representation="raw", k=2, max_candidate_evaluations=budget))
             self.assertEqual(result.stop_reason, "candidate_budget")
             self.assertEqual(result.counters.candidate_evaluations, 0)
             self.assertEqual(result.counters.gradient_evaluations, 0)
             self.assertEqual(result.counters.initial_loss_evaluations, 1)
         result = attack(model.target([3, 3]), [2, 2], model,
-                        AttackConfig(mode="encoder", k=16, candidate_batch_size=4, max_candidate_evaluations=6))
+                        AttackConfig(representation="raw", k=16, candidate_batch_size=4, max_candidate_evaluations=6))
         self.assertEqual(result.stop_reason, "candidate_budget")
         self.assertEqual(result.counters.candidate_evaluations, 6)
         self.assertEqual(result.counters.candidate_batches, 2)
         self.assertEqual(len(result.accepted_substitutions), 1)
         capped = attack(model.target([3, 3]), [2, 2], model,
-                        AttackConfig(mode="encoder", max_iterations=0))
+                        AttackConfig(representation="raw", max_iterations=0))
         self.assertEqual(capped.stop_reason, "max_iterations")
         self.assertEqual(capped.counters.forward_sequence_evaluations, 1)
 
     def test_fixed_special_tokens_and_stopping_loss(self):
         model = TinyModel()
         result = attack(model.target([1, 4]), [1, 2], model,
-                        AttackConfig(mode="encoder", allowed_token_ids=(0, 1, 2, 3, 4, 5)))
+                        AttackConfig(representation="raw", allowed_token_ids=(0, 1, 2, 3, 4, 5)))
         np.testing.assert_array_equal(result.tokens, [1, 4])
         self.assertEqual(result.counters.candidate_evaluations, 3)
         stopped = attack(model.target([3, 3]), [2, 2], model,
-                         AttackConfig(mode="encoder", stopping_loss_tolerance=25))
+                         AttackConfig(representation="raw", stopping_loss_tolerance=25))
         self.assertEqual(stopped.stop_reason, "loss_tolerance")
         self.assertEqual(stopped.counters.gradient_evaluations, 0)
-        fixed = attack(model.target([2, 2]), [1, 1], model, AttackConfig(mode="encoder"))
+        fixed = attack(model.target([2, 2]), [1, 1], model, AttackConfig(representation="raw"))
         self.assertEqual(fixed.stop_reason, "no_editable_positions")
         empty = attack(model.target([3, 3]), [2, 2], model,
-                       AttackConfig(mode="encoder", allowed_token_ids=(0, 1, 2)))
+                       AttackConfig(representation="raw", allowed_token_ids=(0, 1, 2)))
         self.assertEqual(empty.stop_reason, "no_candidates")
 
     def test_exhaustive_neighborhood_freezes_center_and_reports_truncation(self):
@@ -149,7 +149,7 @@ class AttackTests(unittest.TestCase):
         center = np.array([2, 2])
         target = model.target([3, 3])
         diagnostic, counters = exhaustive_single_token_neighborhood(
-            target, center, model, AttackConfig(mode="encoder", candidate_batch_size=2))
+            target, center, model, AttackConfig(representation="raw", candidate_batch_size=2))
         np.testing.assert_array_equal(center, [2, 2])
         np.testing.assert_array_equal(diagnostic.center_tokens, center)
         self.assertEqual(diagnostic.best_loss, 12.5)  # Never combine the two improving moves.
@@ -159,11 +159,11 @@ class AttackTests(unittest.TestCase):
         self.assertEqual(diagnostic.evaluated, 6)
         self.assertEqual(counters.diagnostic_candidate_evaluations, 6)
         truncated, counters = exhaustive_single_token_neighborhood(
-            target, center, model, AttackConfig(mode="encoder", max_candidate_evaluations=2))
+            target, center, model, AttackConfig(representation="raw", max_candidate_evaluations=2))
         self.assertFalse(truncated.complete)
         self.assertEqual(truncated.evaluated, 2)
         self.assertEqual(truncated.neighborhood_size, 6)
-        result = attack(target, center, model, AttackConfig(mode="encoder", max_iterations=1,
+        result = attack(target, center, model, AttackConfig(representation="raw", max_iterations=1,
                          max_candidate_evaluations=8, exhaustive_diagnostic=True))
         self.assertEqual(result.counters.search_candidate_evaluations, 6)
         self.assertEqual(result.counters.diagnostic_candidate_evaluations, 2)
@@ -173,12 +173,12 @@ class AttackTests(unittest.TestCase):
 
     def test_progress_events_do_not_change_search(self):
         model = TinyModel()
-        for mode in ("encoder", "projected"):
+        for representation in ("raw", "prompt_code"):
             events = []
-            target = model.target([3, 3], mode)
-            plain = attack(target, [2, 2], model, AttackConfig(mode=mode, k=2, max_iterations=1))
+            target = model.target([3, 3], representation)
+            plain = attack(target, [2, 2], model, AttackConfig(representation=representation, k=2, max_iterations=1))
             logged = attack(target, [2, 2], model,
-                AttackConfig(mode=mode, k=2, candidate_batch_size=3, max_iterations=1, warmup=True),
+                AttackConfig(representation=representation, k=2, candidate_batch_size=3, max_iterations=1, warmup=True),
                 progress=lambda event, message, **fields: events.append({"event": event, **fields}))
             np.testing.assert_array_equal(logged.tokens, plain.tokens)
             np.testing.assert_allclose(logged.loss_history, plain.loss_history)
@@ -191,7 +191,7 @@ class AttackTests(unittest.TestCase):
 
     def test_configuration_and_target_validation(self):
         for kwargs in ({"k": 0}, {"candidate_batch_size": 0}, {"max_iterations": -1},
-                       {"max_candidate_evaluations": 1.5}, {"mode": "invalid"},
+                       {"max_candidate_evaluations": 1.5}, {"representation": ""},
                        {"acceptance_atol": float("nan")}, {"stopping_loss_tolerance": -1},
                        {"progress_interval_seconds": 0}, {"progress_interval_seconds": float("inf")},
                        {"restarts": 0}, {"restarts": True}, {"seed": -1}, {"stop_restarts_at_tolerance": 1}):
@@ -200,9 +200,11 @@ class AttackTests(unittest.TestCase):
         model = TinyModel()
         for target in (jnp.zeros((2, 1, 1)), jnp.full((1, 2, 1), float("nan"))):
             with self.assertRaises(ValueError):
-                attack(target, [2, 2], model, AttackConfig(mode="encoder"))
+                attack(target, [2, 2], model, AttackConfig(representation="raw"))
         with self.assertRaises(ValueError):
             attack(model.target([3, 3]), [[2, 2], [2, 2]], model)
+        with self.assertRaisesRegex(ValueError, "this model offers"):  # a name the model does not have
+            attack(model.target([3, 3]), [2, 2], model, AttackConfig(representation="encoder_state"))
 
 
 if __name__ == "__main__":

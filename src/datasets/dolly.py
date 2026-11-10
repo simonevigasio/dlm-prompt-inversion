@@ -1,11 +1,14 @@
 """Prepare reproducible, complete English prompts from the public Dolly dataset.
 
-    python -m elf_inversion.datasets.dolly --tokens 20 --count 50
+    python -m elf_inversion.datasets.dolly --family elf --tokens 20 --count 50
+
+Prompt length is counted with the tokenizer of the victim model, so --family is
+required: a prompt of 20 ELF (T5) tokens is not 20 DiffuSeq (BERT) tokens.
 
 Downloads a pinned dataset revision (cached in data/dolly/source), keeps
 standalone instructions of exactly --tokens tokenizer tokens with no special
 tokens, samples --count of them with --seed, and writes
-data/dolly/dolly-<tokens>-tokens-<count>.jsonl plus a provenance manifest.
+data/dolly/dolly-<family>-<tokens>-tokens-<count>.jsonl plus a provenance manifest.
 """
 import argparse
 import hashlib
@@ -14,9 +17,7 @@ from pathlib import Path
 import random
 import urllib.request
 
-from transformers import AutoTokenizer
-
-from ..models.elf.adapter import read_settings
+from .. import models
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = REPO_ROOT / "data" / "dolly"
@@ -60,18 +61,21 @@ def eligible_prompts(source_bytes, tokenizer, tokens):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Prepare a fixed-length prompt dataset from Dolly.")
-    parser.add_argument("--tokens", type=int, default=20, help="Exact tokenizer length of each prompt (1-64)")
+    parser.add_argument("--family", required=True, choices=models.FAMILIES,
+                        help="Victim model family; its tokenizer counts the prompt tokens")
+    parser.add_argument("--tokens", type=int, default=20, help="Exact tokenizer length of each prompt")
     parser.add_argument("--count", type=int, default=50, help="Number of prompts to sample")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--output", type=Path, help="Default: data/dolly/dolly-<tokens>-tokens-<count>.jsonl")
+    parser.add_argument("--output", type=Path,
+                        help="Default: data/dolly/dolly-<family>-<tokens>-tokens-<count>.jsonl")
     parser.add_argument("--cache-dir", type=Path, default=DATA_DIR / "source")
     args = parser.parse_args(argv)
-    if not 1 <= args.tokens <= 64 or args.count <= 0 or args.seed < 0:
-        parser.error("tokens must be 1-64, count positive, and seed nonnegative")
-    output = args.output or DATA_DIR / f"dolly-{args.tokens}-tokens-{args.count}.jsonl"
+    if args.tokens <= 0 or args.count <= 0 or args.seed < 0:
+        parser.error("tokens and count must be positive, and seed nonnegative")
+    output = args.output or DATA_DIR / f"dolly-{args.family}-{args.tokens}-tokens-{args.count}.jsonl"
 
-    spec = read_settings()["tokenizer"]
-    tokenizer = AutoTokenizer.from_pretrained(spec["repo"], revision=spec["revision"])
+    # The tokenizer alone, from the family's default model settings; no model weights are loaded.
+    tokenizer = models.family(args.family).load_tokenizer()
     source_bytes = download_source(args.cache_dir)
     eligible, total = eligible_prompts(source_bytes, tokenizer, args.tokens)
     if len(eligible) < args.count:
@@ -86,7 +90,7 @@ def main(argv=None):
         "license": "CC-BY-SA-3.0", "source_sha256": hashlib.sha256(source_bytes).hexdigest(),
         "field": "instruction", "require_empty_context": True, "exclude_special_tokens": True,
         "deduplicate_text": True, "truncate": False, "add_special_tokens": False,
-        "tokenizer": spec, "exact_token_count": args.tokens, "seed": args.seed,
+        "family": args.family, "tokenizer": tokenizer.name_or_path, "exact_token_count": args.tokens, "seed": args.seed,
         "sampling": "random.Random(seed).sample in source order; selected rows sorted by ID",
         "source_rows": total, "eligible_rows": len(eligible), "selected_rows": len(selected),
         "selected_ids": [row["id"] for row in selected],

@@ -1,13 +1,13 @@
 """Greedy gradient-shortlisted, exact-loss single-token search on any TokenModel (ELF, DiffuSeq).
 
 One attack handles one prompt. Targets are [1, length, dimension] (or
-[length, dimension]); mode is explicit and used for every loss and gradient.
+[length, dimension]), in the representation named by ``AttackConfig.representation``.
 No ground-truth tokens are accepted by this module.
 """
 from dataclasses import dataclass
 from itertools import islice
 from time import perf_counter
-from typing import Iterable, Literal
+from typing import Iterable
 
 import jax
 import jax.numpy as jnp
@@ -16,11 +16,13 @@ import numpy as np
 from ..progress import duration
 
 from .data import allowed_vocabulary, single_prompt
-from .interface import PromptLayout, TokenModel
+from .interface import PROMPT_CODE, PromptLayout, TokenModel
 
 @dataclass(frozen=True)
 class AttackConfig:
-    mode: Literal["encoder", "projected"] = "projected"
+    # Which representation of the prompt the target is given in: "prompt_code" (what Stage A
+    # recovers; every model has it) or another name the model offers (TokenModel.representations).
+    representation: str = PROMPT_CODE
     k: int = 16
     candidate_batch_size: int = 32
     max_iterations: int = 100
@@ -43,8 +45,8 @@ class AttackConfig:
         if (type(self.progress_interval_seconds) not in (int, float) or
                 not np.isfinite(self.progress_interval_seconds) or self.progress_interval_seconds <= 0):
             raise ValueError("progress_interval_seconds must be finite and positive")
-        if self.mode not in ("encoder", "projected"):
-            raise ValueError("mode must be encoder or projected")
+        if not isinstance(self.representation, str) or not self.representation:
+            raise ValueError("representation must be a nonempty name")
         for name in ("k", "candidate_batch_size", "max_iterations", "max_candidate_evaluations", "restarts", "seed"):
             value = getattr(self, name)
             minimum = 1 if name in ("k", "candidate_batch_size", "restarts") else 0
@@ -174,15 +176,16 @@ def _strict_improvement(current, candidate, config):
 
 
 class _Evaluator:
-    def __init__(self, model: TokenModel, target, batch: PromptLayout, mode):
-        self.mode = mode
+    def __init__(self, model: TokenModel, target, batch: PromptLayout, representation):
+        if representation not in model.representations:
+            raise ValueError(f"Unknown representation {representation!r}; this model offers {list(model.representations)}")
         self.model, self.batch = model, batch
         target = jnp.asarray(target)
         if target.ndim == 2:
             target = target[None, ...]
-        dimension = model.target_dimension(mode)
+        dimension = model.target_dimension(representation)
         if target.shape != (1, batch.prompt_length, dimension):
-            raise ValueError("Target shape must match the selected mode and single prompt layout")
+            raise ValueError("Target shape must match the selected representation and single prompt layout")
         if not np.isfinite(np.asarray(target)).all():
             raise ValueError("Target must be finite")
         target = jax.lax.stop_gradient(target)
@@ -191,13 +194,13 @@ class _Evaluator:
             return jnp.mean(jnp.square(pred - target), axis=(1, 2))
 
         def losses(ids):
-            prediction = model.encode_token_ids(batch.with_prompt_ids(ids) , mode=mode)
+            prediction = model.encode_token_ids(batch.with_prompt_ids(ids), representation)
             return _mse(prediction, target)
 
         def gradient(ids):
             current_batch = batch.with_prompt_ids(ids)
             inputs = model.input_embeddings(current_batch)
-            return jax.grad(lambda x: _mse(model.encode_embeddings(x, current_batch, mode), target).mean())(inputs)
+            return jax.grad(lambda x: _mse(model.encode_embeddings(x, current_batch, representation), target).mean())(inputs)
 
         self._losses = jax.jit(losses)
         self._gradient = jax.jit(gradient)
@@ -278,7 +281,7 @@ def _setup(model, target_codes, tokens, config):
     current = np.array(batch.input_ids[0, :batch.prompt_length], dtype=np.int32)
     positions = np.flatnonzero(np.asarray(batch.editable_mask[0, :batch.prompt_length]))
     allowed = allowed_vocabulary(model, config.allowed_token_ids)
-    return current, positions, allowed, _Evaluator(model, target_codes, batch, config.mode)
+    return current, positions, allowed, _Evaluator(model, target_codes, batch, config.representation)
 
 
 def _warmup(evaluator, model, current, positions, allowed, config, report):
@@ -344,7 +347,7 @@ def attack(target_codes, initial_tokens, model: TokenModel, config: AttackConfig
             progress(event, message, **fields)
 
     start = perf_counter()
-    report("attack_start", f"Attack setup: {config.mode}, up to {config.max_iterations} iterations",
+    report("attack_start", f"Attack setup: {config.representation}, up to {config.max_iterations} iterations",
            max_iterations=config.max_iterations, candidate_budget=config.max_candidate_evaluations)
     current, positions, allowed, evaluator = _setup(model, target_codes, initial_tokens, config)
     warmup_seconds = 0.0

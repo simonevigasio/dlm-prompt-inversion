@@ -1,7 +1,7 @@
 """Recover the prompts of diffusion language models (ELF, DiffuSeq) from hidden states.
 
     from elf_inversion import ELFAdapter, AttackConfig, invert_prompt
-    adapter = ELFAdapter.from_config(projected=True)
+    adapter = ELFAdapter.from_config()
     result = invert_prompt("The small bird flew over the quiet", adapter, observation_layer=3)
     print(result.text)
 

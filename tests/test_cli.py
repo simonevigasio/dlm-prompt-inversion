@@ -11,8 +11,8 @@ import yaml
 from elf_inversion.backbone.knowledge import AttackerKnowledge
 from elf_inversion.backbone.recovery import recover
 from elf_inversion.backbone.solver import SolverConfig
-from elf_inversion.cli import (FORWARD_MISMATCH, NOISE_ATTEMPTS, load_config, main, repetition_seeds,
-                               retry_noise_seed)
+from elf_inversion.cli import (FORWARD_MISMATCH, NOISE_ATTEMPTS, derived_seed, load_config, main,
+                               repetition_seeds, retry_noise_seed)
 from elf_inversion.models.elf.setup import BackboneSetup
 from elf_inversion.models.elf.testing import tiny_native_adapter
 from elf_inversion.observation import ForwardMismatch
@@ -36,7 +36,7 @@ class PipelineCommandTests(unittest.TestCase):
     def write_config(self, root, **overrides):
         (root / "model.yaml").write_text("{}\n")
         (root / "stage_a.yaml").write_text(yaml.safe_dump({"restarts": 1}))
-        (root / "stage_b.yaml").write_text(yaml.safe_dump({"mode": "projected", "k": 9, "max_iterations": 2, "seed": 3}))
+        (root / "stage_b.yaml").write_text(yaml.safe_dump({"k": 9, "max_iterations": 2, "seed": 3}))
         config = {"model": "model.yaml", "stage_a": "stage_a.yaml", "stage_b": "stage_b.yaml",
                   "synthetic_observation": {"observation_layer": 0}, **overrides}
         (root / "pipeline.yaml").write_text(yaml.safe_dump(config))
@@ -51,7 +51,7 @@ class PipelineCommandTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             config = self.write_config(root)
-            (root / "stage_b.yaml").write_text(yaml.safe_dump({"mode": "projected", "k": 9, "max_iterations": 2,
+            (root / "stage_b.yaml").write_text(yaml.safe_dump({"k": 9, "max_iterations": 2,
                                                                "seed": 3, "restarts": 3}))
             dataset = self.write_dataset(root, {"id": "a", "text": "4"})
             with patch("elf_inversion.models.elf.adapter.ELFAdapter.from_config", return_value=text_adapter()), \
@@ -95,9 +95,11 @@ class PipelineCommandTests(unittest.TestCase):
             self.assertEqual(rows["b"]["prompt_token_count"], 2)
             self.assertEqual(len(rows["a"]["stage_b_restarts"]), 1)
             self.assertIn("token_accuracy", rows["a"]["stage_b_restarts"][0])
-            # The time is saved for every run; here it is the known first-pass time 0.
-            self.assertEqual((rows["a"]["recovered_time"], rows["a"]["true_time"], rows["a"]["time_error"]),
-                             (0.0, 0.0, 0.0))
+            # The time is known here (first pass, time 0): no recovered time or time error is saved.
+            self.assertEqual(rows["a"]["true_time"], 0.0)
+            for key in ("time_error", "recovered_time"):
+                self.assertNotIn(key, rows["a"])
+            self.assertIn("prompt_code_relative_error", rows["a"])
             summary = json.loads((output / "summary.json").read_text())
             self.assertEqual((summary["prompts"], summary["completed"], summary["skipped"], summary["pending"]),
                              (4, 2, 2, 0))
@@ -155,6 +157,16 @@ class PipelineCommandTests(unittest.TestCase):
             for repetitions in (0, True, 1.5):
                 with self.subTest(repetitions=repetitions), self.assertRaises(ValueError):
                     load_config(self.write_config(root, repetitions=repetitions))
+
+    def test_derived_seeds_never_change(self):
+        # These numbers are written down on purpose. The seed of every experiment is
+        # sha256('["noise",100,"a",0]') -> first 4 bytes -> dropped last bit. If this test fails,
+        # the hashing changed: old results can no longer be reproduced with the same config.
+        self.assertEqual(derived_seed("noise", 100, "a", 0), 647610697)
+        self.assertEqual(derived_seed("stage_a", 42, "a", 0), 250704932)
+        self.assertEqual(derived_seed("noise", 100, "a", 0, 1), 422942958)  # first noise retry
+        for seed in (derived_seed("noise", 100, "a", r) for r in range(50)):
+            self.assertTrue(0 <= seed < 2**31)
 
     def test_dataset_run_resumes_after_crash(self):
         """A run stopped mid-dataset resumes at the first unfinished (prompt, repetition)."""
@@ -265,10 +277,10 @@ class PipelineCommandTests(unittest.TestCase):
             config = self.write_config(root)
             for stage_b in ({"restarts": 0}, {"restarts": True}, {"seed": -1}, {"trials": 2}):
                 with self.subTest(stage_b=stage_b), self.assertRaises((ValueError, TypeError)):
-                    (root / "stage_b.yaml").write_text(yaml.safe_dump({"mode": "projected", **stage_b}))
+                    (root / "stage_b.yaml").write_text(yaml.safe_dump({**stage_b}))
                     load_config(config)
-            (root / "stage_b.yaml").write_text(yaml.safe_dump({"mode": "encoder"}))
-            with self.assertRaisesRegex(ValueError, "projected"):
+            (root / "stage_b.yaml").write_text(yaml.safe_dump({"representation": "encoder_state"}))
+            with self.assertRaisesRegex(ValueError, "prompt_code"):
                 load_config(config)
 
     def test_attacker_knowledge_config(self):
@@ -281,9 +293,16 @@ class PipelineCommandTests(unittest.TestCase):
             self.assertEqual(config.attacker_knowledge, AttackerKnowledge(**section))
             # The manifest records every flag, defaults included.
             self.assertEqual(config.resolved["attacker_knowledge"],
-                             {"observed_rows": "generated", "knows_time": True, "knows_noise_scale": False})
+                             {"observed_rows": "generated", "knows_time": True, "knows_noise_scale": False,
+                              "noise_scale_guess": 1.0})
+            # The starting noise of an attacker who does not know the scale is set in the config.
+            section = {"knows_noise_scale": False, "noise_scale_guess": 3.5}
+            config = load_config(self.write_config(root, attacker_knowledge=section))
+            self.assertEqual(config.attacker_knowledge.noise_scale(2.0), 3.5)
+            self.assertEqual(AttackerKnowledge(noise_scale_guess=3.5).noise_scale(2.0), 2.0)  # known: ignored
             # Bad values are rejected by AttackerKnowledge; unknown flags by the dataclass itself.
-            for bad in ({"observed_rows": "prompt"}, {"knows_time": "yes"}, {"knows_everything": True}):
+            for bad in ({"observed_rows": "prompt"}, {"knows_time": "yes"}, {"knows_everything": True},
+                        {"noise_scale_guess": -1}, {"noise_scale_guess": "2"}, {"noise_scale_guess": True}):
                 with self.subTest(attacker_knowledge=bad), self.assertRaises((ValueError, TypeError)):
                     load_config(self.write_config(root, attacker_knowledge=bad))
 
@@ -335,6 +354,23 @@ class PipelineCommandTests(unittest.TestCase):
             self.assertEqual(from_config.call_args.kwargs["setup"], BackboneSetup(**section))
             manifest = json.loads((root / "run/manifest.json").read_text())
             self.assertEqual(manifest["configuration"]["backbone"]["init_seed"], 4)
+
+    def test_manifest_records_the_model_provenance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = self.write_config(root)
+            dataset = self.write_dataset(root, {"id": "a", "text": "4"})
+            adapter = text_adapter()
+            adapter.provenance = {"weights": "tiny random ELF", "checkpoint_path": Path("/somewhere")}
+            command = ["--config", str(config), "--dataset", str(dataset), "--output", str(root / "run")]
+            with patch("elf_inversion.models.elf.adapter.ELFAdapter.from_config", return_value=adapter):
+                main(command)
+            manifest = json.loads((root / "run/manifest.json").read_text())
+            self.assertEqual(manifest["model_provenance"],
+                             {"weights": "tiny random ELF", "checkpoint_path": "/somewhere"})
+            # The provenance is not part of the resume identity: the same command still resumes.
+            with patch("elf_inversion.models.elf.adapter.ELFAdapter.from_config", return_value=adapter):
+                main(command)
 
     def test_resume_refuses_a_changed_backbone(self):
         """A run resumes only on the same victim model: any backbone change is a new experiment."""
