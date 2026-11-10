@@ -1,7 +1,7 @@
 """DiffuSeq as a victim model of the attack: weights, Stage B token model, Stage A forward map.
 
 ``DiffuSeqAdapter.from_config()`` loads the pinned DiffuSeq checkpoint described by
-``configs/diffuseq.yaml`` (QQP paraphrase by default), after checking the DiffuSeq
+``configs/models/diffuseq.yaml`` (QQP paraphrase by default), after checking the DiffuSeq
 checkout (a git submodule at models/diffuseq/upstream). Upstream is PyTorch: its own
 model and diffusion run the sampler that produces observations (observe.py), and
 forward.py ports the forward pass to JAX for the attack. A ``BackboneSetup`` can replace
@@ -38,7 +38,7 @@ from .forward import BackboneForward, ForwardMetadata
 from .setup import BackboneSetup
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-DEFAULT_SETTINGS = REPO_ROOT / "configs" / "diffuseq.yaml"
+DEFAULT_SETTINGS = REPO_ROOT / "configs" / "models" / "diffuseq.yaml"
 # Upstream modules used here; they live in the "diffuseq" package of the checkout.
 UPSTREAM_MODULES = ("transformer_model", "gaussian_diffusion", "rounding")
 

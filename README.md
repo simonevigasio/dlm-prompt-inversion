@@ -15,7 +15,7 @@ the prompt rows of the hidden state can each be hidden ([attacker knowledge](#at
 ## Setup
 
 Python 3.10–3.12. ELF and DiffuSeq are git submodules, pinned to the commits in
-`configs/model.yaml` and `configs/diffuseq.yaml`:
+`configs/models/elf.yaml` and `configs/models/diffuseq.yaml`:
 
 ```bash
 git clone --recursive <this repo>      # or, in an existing clone: git submodule update --init
@@ -38,7 +38,7 @@ JAX's cuDNN:
 ```
 
 Checkpoints are downloaded on first use. ELF's come from Hugging Face; its denoiser is large
-and its cache defaults to `/tmp/stage-b-hf`: set `denoiser.cache_dir` in `configs/model.yaml`
+and its cache defaults to `/tmp/stage-b-hf`: set `denoiser.cache_dir` in `configs/models/elf.yaml`
 to a persistent path. DiffuSeq's QQP checkpoint is a zip on Google Drive (370 MB), verified
 by its SHA-256 and cached in `~/.cache/elf-prompt-inversion/diffuseq`.
 
@@ -60,7 +60,7 @@ only; a model's prefix or format rows (ELF's time/scale/mode tokens, DiffuSeq's
 its meaning and default: copy it and change what your experiment needs. In short:
 
 ```yaml
-model: ../model.yaml          # the victim: ../model.yaml (ELF) or ../diffuseq.yaml (DiffuSeq)
+model: ../models/elf.yaml     # the victim: ELF, or ../models/diffuseq.yaml for DiffuSeq
 stage_a: ../stage_a/levenberg_marquardt.yaml
 stage_b: ../stage_b/k100.yaml
 synthetic_observation:        # how each prompt's hidden state is generated
@@ -137,7 +137,7 @@ The `model:` file of a pipeline config names the family (`family: elf` or
 Stage A inverts, the sampler that makes observations, what time value a sampler `step`
 means, and the allowed `backbone:` and `synthetic_observation:` keys.
 
-| | ELF (`configs/model.yaml`) | DiffuSeq (`configs/diffuseq.yaml`) |
+| | ELF (`configs/models/elf.yaml`) | DiffuSeq (`configs/models/diffuseq.yaml`) |
 |---|---|---|
 | release | ELF-B, de-en | QQP paraphrase |
 | framework | JAX (the attack runs on the native modules) | PyTorch; `models/diffuseq/forward.py` ports the forward pass to JAX |
@@ -207,8 +207,8 @@ matmul precision to `highest`, so the Python API, the command and the tests comp
 ```text
 run_pipeline.py          run an experiment: dataset → Stage A → Stage B → scores
 configs/
-  model.yaml             ELF: pinned commit, tokenizer and checkpoints (family: elf)
-  diffuseq.yaml          DiffuSeq: pinned commit and checkpoint (family: diffuseq)
+  models/elf.yaml        ELF: pinned commit, tokenizer and checkpoints (family: elf)
+  models/diffuseq.yaml   DiffuSeq: pinned commit and checkpoint (family: diffuseq)
   pipeline/example.yaml  an experiment, with every option explained
   stage_a/, stage_b/     solver / search settings (only values that differ from the defaults)
 src/                     the Python package, imported as elf_inversion
@@ -225,7 +225,7 @@ tests/                   mirror src/: backbone/, tokens/, models/<family>/
 ```
 
 To add a victim model, create `src/models/<name>/` with a `family.py` (see the docstring of
-`src/models/__init__.py`), add the name to `FAMILIES`, and write its model settings file.
+`src/models/__init__.py`), add the name to `FAMILIES`, and write its settings file in `configs/models/`.
 Stage A, Stage B, the pipeline and the command need no change.
 
 ## Tests

@@ -9,7 +9,7 @@ Each family lives in ``models/<name>/`` and has a ``family.py`` module with:
     load_metadata(dict)  ForwardMetadata from a saved observation.json
     load_tokenizer(path) the family's tokenizer alone, from a model settings file (no weights)
 
-A model settings file (e.g. configs/model.yaml) names its family with ``family:``;
+A model settings file (e.g. configs/models/elf.yaml) names its family with ``family:``;
 files without the key are ELF settings.
 
 Importing this package fixes JAX's matmul precision to "highest", so the command, the

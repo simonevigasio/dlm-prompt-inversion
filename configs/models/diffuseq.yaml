@@ -2,7 +2,7 @@
 family: diffuseq
 # diffuseq_root is relative to this file: the official DiffuSeq source, a git submodule of this
 # repository. Fetch it with `git submodule update --init`; its commit must equal diffuseq_commit.
-diffuseq_root: ../src/models/diffuseq/upstream
+diffuseq_root: ../../src/models/diffuseq/upstream
 diffuseq_commit: f78945d79de5783a4329695c0adb1e11adde31bf
 # The released QQP (paraphrase) checkpoint: a zip on Google Drive (README, "Update 28 Nov 2022"),
 # pinned by its SHA-256. It holds training_args.json, the tokenizer and the EMA weights.

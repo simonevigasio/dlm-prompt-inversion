@@ -1,7 +1,7 @@
 """Native JAX/Flax ELF forward maps shared by both stages.
 
 ``ELFAdapter.from_config()`` loads the pinned tokenizer, T5 encoder and ELF
-denoiser described by ``configs/model.yaml``, after checking the ELF checkout
+denoiser described by ``configs/models/elf.yaml``, after checking the ELF checkout
 and checkpoint configuration. A ``BackboneSetup`` can replace the released
 denoiser with random weights, with or without the bottleneck. Generic
 pretrained T5 weights are never loaded.
@@ -30,7 +30,7 @@ from .forward import BackboneForward, ForwardMetadata
 from .setup import BackboneSetup
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-DEFAULT_SETTINGS = REPO_ROOT / "configs" / "model.yaml"
+DEFAULT_SETTINGS = REPO_ROOT / "configs" / "models" / "elf.yaml"
 
 # Upstream ELF modules used here, by short name; they live under <ELF>/src.
 NATIVE_MODULES = {

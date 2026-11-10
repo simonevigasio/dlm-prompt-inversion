@@ -6,8 +6,8 @@
 # Victim model and the two stages (required)
 # ---------------------------------------------------------------------------------------------
 # The model settings file names the family (family: elf | diffuseq); everything model-specific
-# follows from it. For DiffuSeq use ../diffuseq.yaml.
-model: ../model.yaml
+# follows from it. For DiffuSeq use ../models/diffuseq.yaml.
+model: ../models/elf.yaml
 # Stage A (hidden state -> codes): SolverConfig overrides, see src/backbone/solver.py.
 stage_a: ../stage_a/levenberg_marquardt.yaml
 # Stage B (codes -> tokens): AttackConfig overrides, see src/tokens/attack.py.

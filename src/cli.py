@@ -1,7 +1,7 @@
 """Pipeline command: invert every prompt of a dataset, hidden state -> Stage A -> Stage B.
 
 The victim model is the family named by the config's model settings file
-(``family:`` in e.g. configs/model.yaml or configs/diffuseq.yaml; ELF when absent).
+(``family:`` in e.g. configs/models/elf.yaml or configs/models/diffuseq.yaml; ELF when absent).
 
     python run_pipeline.py --config configs/pipeline/example.yaml \\
         --dataset prompts/example.jsonl --output outputs/pipeline/example
